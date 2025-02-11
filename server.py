@@ -8,6 +8,7 @@ import time
 import struct
 import logging
 from config import Config
+from wire_protocol import Message, send_message
 
 # Configure logging
 logging.basicConfig(
@@ -74,79 +75,101 @@ class WireProtocolServer:
         client_socket.send(response)
 
     def handle_client(self, client_socket, address):
+        """Handle client connection with improved wire protocol"""
         logging.info(f"New connection from {address}")
         current_user = None
-        message_buffer = b""
 
         while True:
             try:
-                # Receive header first
-                header = client_socket.recv(6)
-                if not header or len(header) < 6:
+                # Receive a complete message
+                message = Message.receive_message(client_socket)
+                if not message:
                     break
-
-                msg_type, _, length = struct.unpack("!BBI", header)
+                    
+                payload = message.get_payload_string()
                 
-                # Receive payload if any
-                payload = b""
-                while length > 0:
-                    chunk = client_socket.recv(min(length, 4096))
-                    if not chunk:
-                        break
-                    payload += chunk
-                    length -= len(chunk)
-
-                if length > 0:  # Incomplete message
-                    break
-
-                payload = payload.decode() if payload else ""
-
                 with self.lock:
-                    if msg_type == MessageType.CREATE_ACCOUNT:
+                    if message.msg_type == MessageType.CREATE_ACCOUNT:
+                        if ":" not in payload:
+                            send_message(client_socket, MessageType.RESPONSE, False, 
+                                    "Invalid message format")
+                            continue
+                            
                         username, password = payload.split(":", 1)
                         if not username or not password:
-                            self.send_response(client_socket, False, "Username and password required")
+                            send_message(client_socket, MessageType.RESPONSE, False,
+                                    "Username and password required")
                         elif not self.validate_password(password):
-                            self.send_response(client_socket, False, 
+                            send_message(client_socket, MessageType.RESPONSE, False,
                                 "Password must be at least 8 characters with 1 number and 1 uppercase letter")
                         elif username in self.users:
-                            self.send_response(client_socket, False, "Username already exists")
+                            send_message(client_socket, MessageType.RESPONSE, False,
+                                    "Username already exists")
                         else:
                             self.users[username] = (self.hash_password(password), {})
                             self.messages[username] = []
-                            self.send_response(client_socket, True, "Account created successfully")
+                            logging.info(f"New account created: {username} from {address}")
+                            send_message(client_socket, MessageType.RESPONSE, True,
+                                    "Account created successfully")
 
-                    elif msg_type == MessageType.LOGIN:
+                    elif message.msg_type == MessageType.LOGIN:
+                        if ":" not in payload:
+                            send_message(client_socket, MessageType.RESPONSE, False,
+                                    "Invalid message format")
+                            continue
+                            
                         username, password = payload.split(":", 1)
                         if username not in self.users:
-                            self.send_response(client_socket, False, "User not found")
+                            logging.warning(f"Failed login attempt from {address}: User '{username}' not found")
+                            send_message(client_socket, MessageType.RESPONSE, False,
+                                    "User not found")
                         elif self.users[username][0] != self.hash_password(password):
-                            self.send_response(client_socket, False, "Invalid password")
+                            logging.warning(f"Failed login attempt from {address}: Incorrect password for '{username}'")
+                            send_message(client_socket, MessageType.RESPONSE, False,
+                                    "Invalid password")
                         elif username in self.active_users:
-                            self.send_response(client_socket, False, "User already logged in")
+                            logging.warning(f"Failed login attempt from {address}: '{username}' already logged in")
+                            send_message(client_socket, MessageType.RESPONSE, False,
+                                    "User already logged in")
                         else:
                             current_user = username
                             self.active_users[username] = client_socket
-                            unread_count = len([msg for msg in self.messages[username] if not msg["read"]])
-                            response_data = f"{username}:{unread_count}"
-                            self.send_response(client_socket, True, response_data)
+                            unread_count = len([msg for msg in self.messages[username] 
+                                            if not msg["read"]])
+                            logging.info(f"User '{username}' logged in from {address}")
+                            send_message(client_socket, MessageType.RESPONSE, True,
+                                    f"{username}:{unread_count}")
 
-                    elif msg_type == MessageType.LIST_ACCOUNTS:
+                    elif message.msg_type == MessageType.LIST_ACCOUNTS:
                         pattern = payload or "*"
+                        if not pattern.endswith("*"):
+                            pattern = pattern + "*"
+                            
                         matches = []
                         for username in self.users:
                             if fnmatch.fnmatch(username.lower(), pattern.lower()):
                                 status = "online" if username in self.active_users else "offline"
                                 matches.append(f"{username}:{status}")
-                        self.send_response(client_socket, True, "|".join(matches))
+                        
+                        logging.info(f"User list requested from {address}, found {len(matches)} users")
+                        send_message(client_socket, MessageType.RESPONSE, True,
+                                "|".join(matches))
 
-                    elif msg_type == MessageType.SEND_MESSAGE:
+                    elif message.msg_type == MessageType.SEND_MESSAGE:
                         if not current_user:
-                            self.send_response(client_socket, False, "Not logged in")
+                            send_message(client_socket, MessageType.RESPONSE, False,
+                                    "Not logged in")
                         else:
+                            if ":" not in payload:
+                                send_message(client_socket, MessageType.RESPONSE, False,
+                                        "Invalid message format")
+                                continue
+                                
                             recipient, content = payload.split(":", 1)
                             if recipient not in self.users:
-                                self.send_response(client_socket, False, "Recipient not found")
+                                logging.warning(f"Message failed: '{recipient}' does not exist (from {current_user})")
+                                send_message(client_socket, MessageType.RESPONSE, False,
+                                        "Recipient not found")
                             else:
                                 message = {
                                     "id": self.message_id_counter,
@@ -158,72 +181,122 @@ class WireProtocolServer:
                                 self.message_id_counter += 1
                                 self.messages[recipient].append(message)
                                 
+                                # If recipient is active, send immediately
                                 if recipient in self.active_users:
                                     try:
                                         msg_data = f"{message['from']}:{message['content']}"
-                                        response = self.pack_message(MessageType.SEND_MESSAGE, True, msg_data)
-                                        self.active_users[recipient].send(response)
+                                        send_message(self.active_users[recipient],
+                                                MessageType.SEND_MESSAGE,
+                                                True, msg_data)
                                     except:
-                                        pass
+                                        pass  # Ignore delivery failure
 
-                                self.send_response(client_socket, True, "Message sent")
+                                logging.info(f"Message sent from '{current_user}' to '{recipient}'")
+                                send_message(client_socket, MessageType.RESPONSE, True,
+                                        "Message sent")
 
-                    elif msg_type == MessageType.GET_MESSAGES:
+                    elif message.msg_type == MessageType.GET_MESSAGES:
                         if not current_user:
-                            self.send_response(client_socket, False, "Not logged in")
+                            send_message(client_socket, MessageType.RESPONSE, False,
+                                    "Not logged in")
                         else:
                             count = int(payload) if payload else self.config.get("message_fetch_limit")
                             messages = []
-                            for msg in sorted(self.messages[current_user], 
-                                           key=lambda x: x["timestamp"], 
-                                           reverse=True)[:count]:
+                            for msg in sorted(self.messages[current_user],
+                                            key=lambda x: x["timestamp"],
+                                            reverse=True)[:count]:
                                 msg_str = f"{msg['id']}:{msg['from']}:{msg['content']}:{msg['timestamp']}"
                                 messages.append(msg_str)
-                            self.send_response(client_socket, True, "|".join(messages))
+                                msg["read"] = True
+                            
+                            logging.info(f"User '{current_user}' retrieved {len(messages)} messages")
+                            send_message(client_socket, MessageType.RESPONSE, True,
+                                    "|".join(messages))
 
-                    elif msg_type == MessageType.DELETE_MESSAGES:
+                    elif message.msg_type == MessageType.GET_UNDELIVERED:
                         if not current_user:
-                            self.send_response(client_socket, False, "Not logged in")
+                            send_message(client_socket, MessageType.RESPONSE, False,
+                                    "Not logged in")
+                        else:
+                            count = int(payload) if payload else self.config.get("message_fetch_limit")
+                            unread = []
+                            for msg in sorted(
+                                [m for m in self.messages[current_user] if not m["read"]],
+                                key=lambda x: x["timestamp"],
+                                reverse=True
+                            )[:count]:
+                                msg_str = f"{msg['id']}:{msg['from']}:{msg['content']}:{msg['timestamp']}"
+                                unread.append(msg_str)
+                                msg["read"] = True
+                            
+                            logging.info(f"User '{current_user}' retrieved {len(unread)} unread messages")
+                            send_message(client_socket, MessageType.RESPONSE, True,
+                                    "|".join(unread))
+
+                    elif message.msg_type == MessageType.DELETE_MESSAGES:
+                        if not current_user:
+                            send_message(client_socket, MessageType.RESPONSE, False,
+                                    "Not logged in")
                         else:
                             msg_ids = set(int(x) for x in payload.split(","))
                             self.messages[current_user] = [
-                                m for m in self.messages[current_user] 
+                                m for m in self.messages[current_user]
                                 if m["id"] not in msg_ids
                             ]
-                            self.send_response(client_socket, True, "Messages deleted")
+                            
+                            logging.info(f"User '{current_user}' deleted {len(msg_ids)} messages")
+                            send_message(client_socket, MessageType.RESPONSE, True,
+                                    "Messages deleted")
 
-                    elif msg_type == MessageType.DELETE_ACCOUNT:
+                    elif message.msg_type == MessageType.DELETE_ACCOUNT:
                         if not current_user:
-                            self.send_response(client_socket, False, "Not logged in")
+                            send_message(client_socket, MessageType.RESPONSE, False,
+                                    "Not logged in")
                         else:
                             password = payload
                             if self.users[current_user][0] != self.hash_password(password):
-                                self.send_response(client_socket, False, "Invalid password")
+                                logging.warning(f"Failed account deletion for {current_user} - Incorrect password")
+                                send_message(client_socket, MessageType.RESPONSE, False,
+                                        "Invalid password")
                             else:
                                 del self.users[current_user]
                                 del self.messages[current_user]
                                 if current_user in self.active_users:
                                     del self.active_users[current_user]
+                                
+                                logging.info(f"Account deleted: {current_user}")
                                 current_user = None
-                                self.send_response(client_socket, True, "Account deleted")
+                                send_message(client_socket, MessageType.RESPONSE, True,
+                                        "Account deleted")
 
-                    elif msg_type == MessageType.LOGOUT:
+                    elif message.msg_type == MessageType.LOGOUT:
                         if not current_user:
-                            self.send_response(client_socket, False, "Not logged in")
+                            send_message(client_socket, MessageType.RESPONSE, False,
+                                    "Not logged in")
                         else:
                             if current_user in self.active_users:
                                 del self.active_users[current_user]
+                            
+                            logging.info(f"User '{current_user}' logged out")
                             current_user = None
-                            self.send_response(client_socket, True, "Logged out successfully")
+                            send_message(client_socket, MessageType.RESPONSE, True,
+                                    "Logged out successfully")
 
             except Exception as e:
-                logging.error(f"Error handling client: {e}")
+                logging.error(f"Error handling client {address}: {e}")
                 break
 
-        if current_user in self.active_users:
+        # Cleanup on disconnect
+        if current_user and current_user in self.active_users:
             del self.active_users[current_user]
+            logging.info(f"User '{current_user}' disconnected")
         
-        client_socket.close()
+        try:
+            client_socket.close()
+        except:
+            pass
+        
+        logging.info(f"Connection closed for {address}")
 
     def start(self):
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
