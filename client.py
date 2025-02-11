@@ -6,19 +6,23 @@ import argparse
 import struct
 from tkinter import ttk, messagebox
 from config import Config
-from wire_protocol import Message, send_message
+
+# Control characters for message separation
+UNIT_SEP = b'\x1F'  # Separates major fields
+RECORD_SEP = b'\x1E'  # Separates multiple records
+GROUP_SEP = b'\x1D'  # Separates subfields
 
 class MessageType:
-    CREATE_ACCOUNT = 1
-    LOGIN = 2
-    LIST_ACCOUNTS = 3
-    SEND_MESSAGE = 4
-    GET_MESSAGES = 5
-    GET_UNDELIVERED = 6
-    DELETE_MESSAGES = 7
-    DELETE_ACCOUNT = 8
-    LOGOUT = 9
-    RESPONSE = 10
+    CREATE_ACCOUNT = 0x01
+    LOGIN = 0x02
+    LIST_ACCOUNTS = 0x03
+    SEND_MESSAGE = 0x04
+    GET_MESSAGES = 0x05
+    GET_UNDELIVERED = 0x06
+    DELETE_MESSAGES = 0x07
+    DELETE_ACCOUNT = 0x08
+    LOGOUT = 0x09
+    NOTIFICATION = 0x0A
 
 class MessageFrame(ttk.Frame):
     def __init__(self, parent, message_data, on_select=None):
@@ -52,26 +56,65 @@ class MessageFrame(ttk.Frame):
 
 class ChatClient:
     def __init__(self, host):
+        self.config = Config()
+        self.host = host
+        self.port = self.config.get("port")
+        self.username = None
+        self.running = False
+        
+        # Create the root window first
         self.root = tk.Tk()
         self.root.title("Chat Application")
         self.root.geometry("1000x800")
         
-        self.config = Config()
-        self.host = host
-        self.port = self.config.get("port")
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # Show connecting message
+        self.connecting_label = ttk.Label(self.root, text="Connecting to server...")
+        self.connecting_label.pack(expand=True)
+        
+        # Schedule connection attempt after GUI starts
+        self.root.after(100, self.connect_to_server)
+        
+    def connect_to_server(self):
         try:
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.socket.settimeout(5.0)  # Add timeout for connection
             self.socket.connect((self.host, self.port))
+            self.socket.settimeout(None)  # Remove timeout for normal operation
+            
+            # Initialize variables
+            self.search_var = tk.StringVar()
+            self.user_count_var = tk.StringVar(value="Users found: 0")
+            self.online_count_var = tk.StringVar(value="Online users: 0")
+            self.recipient_var = tk.StringVar()
+            self.status_var = tk.StringVar(value="Not logged in")
+            
+            # Connection successful, setup GUI
+            self.connecting_label.destroy()
+            self.setup_gui()
+            self.running = True
+            threading.Thread(target=self.receive_messages, daemon=True).start()
+            
         except ConnectionRefusedError:
             messagebox.showerror("Error", "Could not connect to server")
             self.root.destroy()
-            return
-            
-        self.username = None
-        self.setup_gui()
-        self.running = True
-        threading.Thread(target=self.receive_messages, daemon=True).start()
+        except Exception as e:
+            messagebox.showerror("Error", f"Connection error: {e}")
+            self.root.destroy()
         
+    def pack_message(self, msg_type, payload=b""):
+        """Pack message into binary format with header"""
+        if isinstance(payload, str):
+            payload = payload.encode()
+        version = 0x01  # Protocol version 1
+        success = 0x01  # Not used in client->server messages
+        header = struct.pack("!BBBI", version, msg_type, success, len(payload))
+        return header + payload
+
+    def unpack_message(self, header, payload=b""):
+        """Unpack binary message"""
+        version, msg_type, success, length = struct.unpack("!BBBI", header)
+        return version, msg_type, bool(success), payload.decode() if payload else ""
+
     def setup_gui(self):
         style = ttk.Style()
         style.configure('Bold.TLabel', font=('TkDefaultFont', 9, 'bold'))
@@ -94,7 +137,7 @@ class ChatClient:
         self.status_var = tk.StringVar(value="Not logged in")
         status = ttk.Label(self.root, textvariable=self.status_var)
         status.pack(side='bottom', fill='x', padx=5, pady=2)
-        
+
     def setup_auth_frame(self):
         frame = ttk.LabelFrame(self.auth_frame, text="Authentication", padding=10)
         frame.pack(expand=True, fill='both', padx=10, pady=10)
@@ -213,8 +256,7 @@ class ChatClient:
 
         self.accounts_list.bind('<Double-1>', self.on_user_select)
         
-        send_frame = ttk.LabelFrame(self.accounts_frame, 
-                                  text="Send Message", padding=5)
+        send_frame = ttk.LabelFrame(self.accounts_frame, text="Send Message", padding=5)
         send_frame.pack(fill='x', padx=5, pady=5)
         
         to_frame = ttk.Frame(send_frame)
@@ -222,9 +264,7 @@ class ChatClient:
         
         ttk.Label(to_frame, text="To:").pack(side='left', padx=(0, 5))
         self.recipient_var = tk.StringVar()
-        self.recipient_entry = ttk.Entry(to_frame, 
-                                       textvariable=self.recipient_var,
-                                       state='readonly')
+        self.recipient_entry = ttk.Entry(to_frame, textvariable=self.recipient_var, state='readonly')
         self.recipient_entry.pack(side='left', fill='x', expand=True)
         
         ttk.Label(send_frame).pack()
@@ -232,7 +272,7 @@ class ChatClient:
         self.message_text.pack()
         
         ttk.Button(send_frame, text="Send", 
-                  command=self.send_message).pack(fill='x', pady=5)
+                command=self.send_message).pack(fill='x', pady=5)
 
         status_frame = ttk.Frame(self.accounts_frame)
         status_frame.pack(fill='x', padx=5, pady=5)
@@ -251,8 +291,21 @@ class ChatClient:
         if not username or not password:
             messagebox.showwarning("Warning", "Please enter username and password")
             return
+        
+        payload = f"{username}{UNIT_SEP.decode()}{password}"
+        message = self.pack_message(MessageType.CREATE_ACCOUNT, payload)
+        try:
+            self.socket.send(message)
+            response_header = self.socket.recv(7)
+            version, msg_type, success, length = struct.unpack("!BBBI", response_header)
+            response_payload = self.socket.recv(length) if length > 0 else b""
             
-        send_message(self.socket, MessageType.CREATE_ACCOUNT, True, f"{username}:{password}")
+            if success:
+                messagebox.showinfo("Success", "Account created successfully! Please log in.")
+            else:
+                messagebox.showerror("Error", response_payload.decode())
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to create account: {e}")
 
     def login(self):
         username = self.username_entry.get()
@@ -261,8 +314,26 @@ class ChatClient:
         if not username or not password:
             messagebox.showwarning("Warning", "Please enter username and password")
             return
+        
+        payload = f"{username}{UNIT_SEP.decode()}{password}"
+        message = self.pack_message(MessageType.LOGIN, payload)
+        try:
+            self.socket.send(message)
+            response_header = self.socket.recv(7)
+            version, msg_type, success, length = struct.unpack("!BBBI", response_header)
+            response_payload = self.socket.recv(length) if length > 0 else b""
             
-        send_message(self.socket, MessageType.LOGIN, True, f"{username}:{password}")
+            if success:
+                username, unread_count = response_payload.decode().split(UNIT_SEP.decode())
+                self.username = username
+                self.status_var.set(f"Logged in as: {self.username}")
+                self.notebook.select(1)  # Switch to users tab
+                messagebox.showinfo("Login Successful", f"You have {unread_count} unread messages")
+                self.search_accounts()  # Refresh user list
+            else:
+                messagebox.showerror("Error", response_payload.decode())
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to login: {e}")
 
     def send_message(self):
         if not self.username:
@@ -276,8 +347,20 @@ class ChatClient:
             messagebox.showwarning("Warning", "Please enter recipient and message")
             return
             
-        send_message(self.socket, MessageType.SEND_MESSAGE, True, f"{recipient}:{message}")
-        self.message_text.delete("1.0", tk.END)
+        payload = f"{recipient}{UNIT_SEP.decode()}{message}"
+        message_data = self.pack_message(MessageType.SEND_MESSAGE, payload)
+        try:
+            self.socket.send(message_data)
+            response_header = self.socket.recv(7)
+            version, msg_type, success, length = struct.unpack("!BBBI", response_header)
+            response_payload = self.socket.recv(length) if length > 0 else b""
+            
+            if success:
+                self.message_text.delete("1.0", tk.END)
+            else:
+                messagebox.showerror("Error", response_payload.decode())
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to send message: {e}")
 
     def refresh_messages(self):
         try:
@@ -285,7 +368,31 @@ class ChatClient:
         except ValueError:
             count = self.config.get("message_fetch_limit")
                 
-        send_message(self.socket, MessageType.GET_MESSAGES, True, str(count))
+        message = self.pack_message(MessageType.GET_MESSAGES, str(count))
+        try:
+            self.socket.send(message)
+            response_header = self.socket.recv(7)
+            version, msg_type, success, length = struct.unpack("!BBBI", response_header)
+            response_payload = self.socket.recv(length) if length > 0 else b""
+            
+            if success:
+                self.clear_messages()
+                if response_payload:
+                    message_list = response_payload.decode().split(RECORD_SEP.decode())
+                    for msg_str in message_list:
+                        msg_id, sender, content, timestamp = msg_str.split(GROUP_SEP.decode())
+                        message_data = {
+                            "id": int(msg_id),
+                            "from": sender,
+                            "content": content,
+                            "timestamp": float(timestamp)
+                        }
+                        frame = MessageFrame(self.messages_frame, message_data)
+                        frame.pack(fill='x', padx=5, pady=2)
+            else:
+                messagebox.showerror("Error", response_payload.decode())
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to fetch messages: {e}")
 
     def refresh_unread_messages(self):
         try:
@@ -293,14 +400,66 @@ class ChatClient:
         except ValueError:
             count = self.config.get("message_fetch_limit")
                 
-        send_message(self.socket, MessageType.GET_UNDELIVERED, True, str(count))
+        message = self.pack_message(MessageType.GET_UNDELIVERED, str(count))
+        try:
+            self.socket.send(message)
+            response_header = self.socket.recv(7)
+            version, msg_type, success, length = struct.unpack("!BBBI", response_header)
+            response_payload = self.socket.recv(length) if length > 0 else b""
+            
+            if success:
+                self.clear_messages()
+                if response_payload:
+                    message_list = response_payload.decode().split(RECORD_SEP.decode())
+                    for msg_str in message_list:
+                        msg_id, sender, content, timestamp = msg_str.split(GROUP_SEP.decode())
+                        message_data = {
+                            "id": int(msg_id),
+                            "from": sender,
+                            "content": content,
+                            "timestamp": float(timestamp)
+                        }
+                        frame = MessageFrame(self.messages_frame, message_data)
+                        frame.pack(fill='x', padx=5, pady=2)
+            else:
+                messagebox.showerror("Error", response_payload.decode())
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to fetch unread messages: {e}")
 
     def search_accounts(self):
         pattern = self.search_var.get()
         if pattern and not pattern.endswith("*"):
             pattern = pattern + "*"
             
-        send_message(self.socket, MessageType.LIST_ACCOUNTS, True, pattern)
+        message = self.pack_message(MessageType.LIST_ACCOUNTS, pattern)
+        try:
+            self.socket.send(message)
+            response_header = self.socket.recv(7)
+            version, msg_type, success, length = struct.unpack("!BBBI", response_header)
+            response_payload = self.socket.recv(length) if length > 0 else b""
+            
+            if success:
+                self.accounts_list.delete(*self.accounts_list.get_children())
+                if response_payload:
+                    users = response_payload.decode().split(RECORD_SEP.decode())
+                    online_count = 0
+                    for user_str in users:
+                        if GROUP_SEP.decode() in user_str:  # Check if the string contains the separator
+                            username, status = user_str.split(GROUP_SEP.decode())
+                            self.accounts_list.insert("", "end", values=(username, status))
+                            if status == "online":
+                                online_count += 1
+                        else:
+                            # Handle malformed user string
+                            print(f"Malformed user string received: {user_str}")
+                            continue
+                    
+                    self.user_count_var.set(f"Users found: {len(users)}")
+                    self.online_count_var.set(f"Online users: {online_count}")
+            else:
+                messagebox.showerror("Error", response_payload.decode())
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to fetch user list: {e}")
 
     def delete_selected_messages(self):
         selected_ids = []
@@ -310,8 +469,22 @@ class ChatClient:
         
         if selected_ids:
             if messagebox.askyesno("Confirm", f"Delete {len(selected_ids)} selected messages?"):
-                send_message(self.socket, MessageType.DELETE_MESSAGES, True,
-                           ",".join(str(id) for id in selected_ids))
+                payload = GROUP_SEP.decode().join(str(id) for id in selected_ids)
+                message = self.pack_message(MessageType.DELETE_MESSAGES, payload)
+                try:
+                    self.socket.send(message)
+                    response_header = self.socket.recv(7)
+                    version, msg_type, success, length = struct.unpack("!BBBI", response_header)
+                    response_payload = self.socket.recv(length) if length > 0 else b""
+                    
+                    if success:
+                        for widget in self.messages_frame.winfo_children():
+                            if isinstance(widget, MessageFrame) and widget.message_id in selected_ids:
+                                widget.destroy()
+                    else:
+                        messagebox.showerror("Error", response_payload.decode())
+                except Exception as e:
+                    messagebox.showerror("Error", f"Failed to delete messages: {e}")
 
     def delete_account(self):
         if not self.username:
@@ -323,13 +496,43 @@ class ChatClient:
             messagebox.showwarning("Warning", "Please enter your password")
             return
             
-        if messagebox.askyesno("Confirm", 
-                              "Delete your account? This cannot be undone."):
-            send_message(self.socket, MessageType.DELETE_ACCOUNT, True, password)
+        if messagebox.askyesno("Confirm", "Delete your account? This cannot be undone."):
+            message = self.pack_message(MessageType.DELETE_ACCOUNT, password)
+            try:
+                self.socket.send(message)
+                response_header = self.socket.recv(7)
+                version, msg_type, success, length = struct.unpack("!BBBI", response_header)
+                response_payload = self.socket.recv(length) if length > 0 else b""
+                
+                if success:
+                    self.username = None
+                    self.status_var.set("Not logged in")
+                    self.notebook.select(0)
+                    self.clear_messages()
+                    messagebox.showinfo("Success", "Account deleted successfully")
+                else:
+                    messagebox.showerror("Error", response_payload.decode())
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to delete account: {e}")
 
     def logout(self):
         if self.username:
-            send_message(self.socket, MessageType.LOGOUT, True)
+            message = self.pack_message(MessageType.LOGOUT)
+            try:
+                self.socket.send(message)
+                response_header = self.socket.recv(7)
+                version, msg_type, success, length = struct.unpack("!BBBI", response_header)
+                response_payload = self.socket.recv(length) if length > 0 else b""
+                
+                if success:
+                    self.username = None
+                    self.status_var.set("Not logged in")
+                    self.notebook.select(0)
+                    self.clear_messages()
+                else:
+                    messagebox.showerror("Error", response_payload.decode())
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to logout: {e}")
 
     def on_user_select(self, event):
         selection = self.accounts_list.selection()
@@ -343,98 +546,126 @@ class ChatClient:
         for widget in self.messages_frame.winfo_children():
             widget.destroy()
 
-    def parse_messages(self, messages_str):
-        """Parse messages from server format into message objects"""
-        messages = []
-        if not messages_str:
-            return messages
+    def send_and_receive(self, message, timeout=5.0):
+        """Send a message and receive response with timeout"""
+        try:
+            self.socket.settimeout(timeout)
+            self.socket.send(message)
             
-        for msg_str in messages_str.split("|"):
-            msg_id, sender, content, timestamp = msg_str.split(":", 3)
-            messages.append({
-                "id": int(msg_id),
-                "from": sender,
-                "content": content,
-                "timestamp": float(timestamp)
-            })
-        return messages
-
-    def update_messages_display(self, messages):
-        """Update the messages display with new messages"""
-        self.clear_messages()
-        for message_data in messages:
-            frame = MessageFrame(self.messages_frame, message_data)
-            frame.pack(fill='x', padx=5, pady=2)
-
-    def update_users_display(self, users_str):
-        """Update the users list display"""
-        self.accounts_list.delete(*self.accounts_list.get_children())
-        if not users_str:
-            return
+            # Receive header
+            response_header = self.socket.recv(7)
+            if len(response_header) != 7:
+                raise ConnectionError("Incomplete response header")
+                
+            version, msg_type, success, length = struct.unpack("!BBBI", response_header)
             
-        users = users_str.split("|")
-        online_count = 0
-        for user_str in users:
-            username, status = user_str.split(":")
-            self.accounts_list.insert("", "end", values=(username, status))
-            if status == "online":
-                online_count += 1
+            # Receive payload if any
+            response_payload = b""
+            while length > 0:
+                chunk = self.socket.recv(min(length, 4096))
+                if not chunk:
+                    raise ConnectionError("Connection closed while receiving payload")
+                response_payload += chunk
+                length -= len(chunk)
+                
+            self.socket.settimeout(None)
+            return version, msg_type, success, response_payload
+            
+        except socket.timeout:
+            raise TimeoutError("Server response timeout")
+        finally:
+            self.socket.settimeout(None)
+            
+    def create_account(self):
+        username = self.username_entry.get()
+        password = self.password_entry.get()
         
-        self.user_count_var.set(f"Users found: {len(users)}")
-        self.online_count_var.set(f"Online users: {online_count}")
+        if not username or not password:
+            messagebox.showwarning("Warning", "Please enter username and password")
+            return
+        
+        payload = f"{username}{UNIT_SEP.decode()}{password}"
+        message = self.pack_message(MessageType.CREATE_ACCOUNT, payload)
+        
+        try:
+            version, msg_type, success, response_payload = self.send_and_receive(message)
+            
+            if success:
+                messagebox.showinfo("Success", "Account created successfully! Please log in.")
+            else:
+                messagebox.showerror("Error", response_payload.decode())
+                
+        except TimeoutError:
+            messagebox.showerror("Error", "Server not responding")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to create account: {e}")
+            
+    def login(self):
+        username = self.username_entry.get()
+        password = self.password_entry.get()
+        
+        if not username or not password:
+            messagebox.showwarning("Warning", "Please enter username and password")
+            return
+        
+        payload = f"{username}{UNIT_SEP.decode()}{password}"
+        message = self.pack_message(MessageType.LOGIN, payload)
+        
+        try:
+            version, msg_type, success, response_payload = self.send_and_receive(message)
+            
+            if success:
+                username, unread_count = response_payload.decode().split(UNIT_SEP.decode())
+                self.username = username
+                self.status_var.set(f"Logged in as: {self.username}")
+                self.notebook.select(1)  # Switch to users tab
+                messagebox.showinfo("Login Successful", f"You have {unread_count} unread messages")
+                self.search_accounts()  # Refresh user list
+            else:
+                messagebox.showerror("Error", response_payload.decode())
+                
+        except TimeoutError:
+            messagebox.showerror("Error", "Server not responding")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to login: {e}")
 
     def receive_messages(self):
         """Handle incoming messages from server"""
         while self.running:
             try:
-                # Receive a complete message
-                message = Message.receive_message(self.socket)
-                if not message:
-                    self.on_connection_lost()
+                self.socket.settimeout(1.0)  # Short timeout for checking running status
+                header = self.socket.recv(7)
+                
+                if not header or len(header) != 7:
+                    if self.running:  # Only show error if we're still meant to be running
+                        self.root.after(0, self.on_connection_lost)
                     break
 
-                payload = message.get_payload_string()
+                version, msg_type, success, length = struct.unpack("!BBBI", header)
                 
-                # Handle different message types
-                if message.msg_type == MessageType.SEND_MESSAGE:
-                    if ":" in payload:
-                        sender, content = payload.split(":", 1)
+                # Receive payload if any
+                payload = b""
+                while length > 0:
+                    chunk = self.socket.recv(min(length, 4096))
+                    if not chunk:
+                        break
+                    payload += chunk
+                    length -= len(chunk)
+
+                if length > 0:  # Incomplete message
+                    if self.running:
+                        self.root.after(0, self.on_connection_lost)
+                    break
+
+                # Handle message based on type
+                if msg_type == MessageType.NOTIFICATION:
+                    if success:
+                        sender, content = payload.decode().split(GROUP_SEP.decode())
                         self.root.after(0, lambda s=sender: messagebox.showinfo(
                             "New Message", f"New message from {s}"))
-                    
-                elif message.msg_type == MessageType.RESPONSE:
-                    if not message.success:
-                        if payload:
-                            self.root.after(0, lambda p=payload: messagebox.showerror(
-                                "Error", p))
-                    else:
-                        if ":" in payload and not self.username:  # Login response
-                            username, unread = payload.split(":")
-                            self.username = username
-                            self.status_var.set(f"Logged in as: {self.username}")
-                            self.notebook.select(1)  # Switch to users tab
-                            self.root.after(0, lambda u=unread: messagebox.showinfo(
-                                "Login Successful", f"You have {u} unread messages"))
-                            self.search_accounts()
-                        elif "|" in payload:  # Messages or users list
-                            if ":" in payload and "online" in payload.lower():
-                                self.root.after(0, lambda p=payload: self.update_users_display(p))
-                            else:
-                                messages = self.parse_messages(payload)
-                                self.root.after(0, lambda m=messages: self.update_messages_display(m))
-                        elif payload == "Account deleted":
-                            self.username = None
-                            self.status_var.set("Not logged in")
-                            self.notebook.select(0)
-                            self.clear_messages()
-                            self.root.after(0, lambda: messagebox.showinfo(
-                                "Success", "Account deleted successfully"))
-                        elif payload == "Logged out successfully":
-                            self.username = None
-                            self.status_var.set("Not logged in")
-                            self.notebook.select(0)
-                            self.clear_messages()
                             
+            except socket.timeout:
+                continue  # Just check running status again
             except Exception as e:
                 if self.running:
                     print(f"Error receiving message: {e}")
@@ -450,12 +681,17 @@ class ChatClient:
     def run(self):
         def check_users_periodically():
             if self.username and self.running:
-                self.search_accounts()
-                self.root.after(1000, check_users_periodically)
+                try:
+                    self.search_accounts()
+                except Exception as e:
+                    print(f"Error in periodic update: {e}")
+                finally:
+                    if self.running:
+                        self.root.after(5000, check_users_periodically)  # Increased interval to 5 seconds
 
-        self.root.after(1000, check_users_periodically)
+        # Wait a bit for GUI to be fully initialized before starting periodic checks
+        self.root.after(5000, check_users_periodically)  # Start first check after 5 seconds
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-        self.search_accounts()
         self.root.mainloop()
 
     def on_closing(self):
