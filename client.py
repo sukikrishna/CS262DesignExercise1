@@ -335,13 +335,13 @@ class ChatClient:
         }
         self.send_data(message)
 
-        response = self.receive_data()
-        if response and response.get("success"):
-            logging.info(f"Login successful for {username}")
-            return True
-        else:
-            logging.error(f"Login failed: {response.get('message', 'Unknown error')}")
-            return False
+        # response = self.receive_data()
+        # if response and response.get("success"):
+        #     logging.info(f"Login successful for {username}")
+        #     return True
+        # else:
+        #     logging.error(f"Login failed: {response.get('message', 'Unknown error')}")
+        #     return False
 
     def login(self):
         username = self.username_entry.get()
@@ -360,12 +360,12 @@ class ChatClient:
         self.send_data(message)
 
         response = self.receive_data()
-        if response and response.get("success"):
-            logging.info(f"Login successful for {username}")
-            return True
-        else:
-            logging.error(f"Login failed: {response.get('message', 'Unknown error')}")
-            return False
+        # if response and response.get("success"):
+        #     logging.info(f"Login successful for {username}")
+        #     return True
+        # else:
+        #     logging.error(f"Login failed: {response.get('message', 'Unknown error')}")
+        #     return False
 
     def send_message(self):
         if not self.username:
@@ -387,12 +387,12 @@ class ChatClient:
         }
         self.send_data(message)
 
-        response = self.receive_data()
-        if response and response.get("success"):
-            logging.info("Message sent successfully")
-            self.message_text.delete("1.0", tk.END)  # Clears the input field
-        else:
-            logging.error(f"Failed to send message: {response.get('message', 'Unknown error')}")
+        # response = self.receive_data()
+        # if response and response.get("success"):
+        #     logging.info("Message sent successfully")
+        #     self.message_text.delete("1.0", tk.END)  # Clears the input field
+        # else:
+        #     logging.error(f"Failed to send message: {response.get('message', 'Unknown error')}")
             
     def delete_message(self, msg_id):
         if messagebox.askyesno("Confirm", "Delete this message?"):
@@ -403,11 +403,11 @@ class ChatClient:
             }
             self.send_data(message)
 
-            response = self.receive_data()
-            if response and response.get("success"):
-                logging.info("Messages deleted successfully")
-            else:
-                logging.error(f"Failed to delete messages: {response.get('message', 'Unknown error')}")
+            # response = self.receive_data()
+            # if response and response.get("success"):
+            #     logging.info("Messages deleted successfully")
+            # else:
+            #     logging.error(f"Failed to delete messages: {response.get('message', 'Unknown error')}")
 
             # Remove the message frame immediately
             for widget in self.messages_frame.winfo_children():
@@ -432,14 +432,14 @@ class ChatClient:
                 self.send_data(message)
 
                 response = self.receive_data()
-                if response and response.get("success"):
-                    # Remove the message frames immediately
-                    for widget in self.messages_frame.winfo_children():
-                        if isinstance(widget, MessageFrame) and widget.message_id in selected_ids:
-                            widget.destroy()
-                    logging.info(f"Deleted {len(selected_ids)} messages")
-                else:
-                    logging.error(f"Failed to delete messages: {response.get('message', 'Unknown error')}")
+                # if response and response.get("success"):
+                #     # Remove the message frames immediately
+                for widget in self.messages_frame.winfo_children():
+                    if isinstance(widget, MessageFrame) and widget.message_id in selected_ids:
+                        widget.destroy()
+                #     logging.info(f"Deleted {len(selected_ids)} messages")
+                # else:
+                #     logging.error(f"Failed to delete messages: {response.get('message', 'Unknown error')}")
 
 
     def refresh_messages(self):
