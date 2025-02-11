@@ -456,15 +456,15 @@ class ChatClient:
         self.send_data(message)
 
         response = self.receive_data()
-        if response and response.get("success"):
-            self.clear_messages()
-            for msg in response["messages"]:
-                frame = MessageFrame(self.messages_frame, msg)
-                frame.message_id = msg["id"]
-                frame.pack(fill='x', padx=5, pady=2)
-            logging.info(f"Retrieved {len(response['messages'])} messages")
-        else:
-            logging.error(f"Failed to fetch messages: {response.get('message', 'Unknown error')}")
+        # if response and response.get("success"):
+        #     self.clear_messages()
+        for msg in response["messages"]:
+            frame = MessageFrame(self.messages_frame, msg)
+            frame.message_id = msg["id"]
+            frame.pack(fill='x', padx=5, pady=2)
+        #     logging.info(f"Retrieved {len(response['messages'])} messages")
+        # else:
+        #     logging.error(f"Failed to fetch messages: {response.get('message', 'Unknown error')}")
 
 
     def refresh_unread_messages(self):
@@ -482,15 +482,15 @@ class ChatClient:
         self.send_data(message)
 
         response = self.receive_data()
-        if response and response.get("success"):
-            self.clear_messages()
-            for msg in response["messages"]:
-                frame = MessageFrame(self.messages_frame, msg)
-                frame.message_id = msg["id"]
-                frame.pack(fill='x', padx=5, pady=2)
-            logging.info(f"Retrieved {len(response['messages'])} unread messages")
-        else:
-            logging.error(f"Failed to fetch unread messages: {response.get('message', 'Unknown error')}")
+        # if response and response.get("success"):
+        self.clear_messages()
+        for msg in response["messages"]:
+            frame = MessageFrame(self.messages_frame, msg)
+            frame.message_id = msg["id"]
+            frame.pack(fill='x', padx=5, pady=2)
+        #     logging.info(f"Retrieved {len(response['messages'])} unread messages")
+        # else:
+        #     logging.error(f"Failed to fetch unread messages: {response.get('message', 'Unknown error')}")
 
 
     def on_user_select(self, event):
@@ -512,17 +512,17 @@ class ChatClient:
         }
         self.send_data(message)
 
-        response = self.receive_data()
-        if response and response.get("success"):
-            users = response.get("users", [])
-            if users:
-                logging.info(f"Found {len(users)} users:")
-                for user in users:
-                    print(f"Username: {user['username']} (Status: {user['status']})")
-            else:
-                logging.info("No users found.")
-        else:
-            logging.error(f"User search failed: {response.get('message', 'Unknown error')}")
+        # response = self.receive_data()
+        # if response and response.get("success"):
+        #     users = response.get("users", [])
+        #     if users:
+        #         logging.info(f"Found {len(users)} users:")
+        #         for user in users:
+        #             print(f"Username: {user['username']} (Status: {user['status']})")
+        #     else:
+        #         logging.info("No users found.")
+        # else:
+        #     logging.error(f"User search failed: {response.get('message', 'Unknown error')}")
 
     def delete_account(self):
         if not self.username:
@@ -543,12 +543,12 @@ class ChatClient:
             }
             self.send_data(message)
 
-            response = self.receive_data()
-            if response and response.get("success"):
-                logging.info("Account deleted successfully")
-                self.username = None  # Clear username
-            else:
-                logging.error(f"Failed to delete account: {response.get('message', 'Unknown error')}")
+            # response = self.receive_data()
+            # if response and response.get("success"):
+            #     logging.info("Account deleted successfully")
+            #     self.username = None  # Clear username
+            # else:
+            #     logging.error(f"Failed to delete account: {response.get('message', 'Unknown error')}")
 
     def logout(self):
         """Logout from the server if logged in."""
@@ -559,12 +559,12 @@ class ChatClient:
         message = {"cmd": "logout", "version": 1}
         self.send_data(message)
 
-        response = self.receive_data()
-        if response and response.get("success"):
-            logging.info("Logged out successfully")
-            self.username = None  # Clear username after logout
-        else:
-            logging.error(f"Logout failed: {response.get('message', 'Unknown error')}")
+        # response = self.receive_data()
+        # if response and response.get("success"):
+        #     logging.info("Logged out successfully")
+        #     self.username = None  # Clear username after logout
+        # else:
+        #     logging.error(f"Logout failed: {response.get('message', 'Unknown error')}")
 
     def clear_messages(self):
         for widget in self.messages_frame.winfo_children():
