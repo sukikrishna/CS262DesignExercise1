@@ -1,9 +1,11 @@
+# custom_client.py
 import socket
-import json
+import struct
 import threading
 import tkinter as tk
 import time
 import argparse
+import logging
 from tkinter import ttk, messagebox
 from config import Config
 
@@ -22,7 +24,7 @@ class MessageFrame(ttk.Frame):
         select_cb.pack(side='left', padx=(0, 5))
         
         time_str = time.strftime('%Y-%m-%d %H:%M:%S', 
-                               time.localtime(message_data["timestamp"]))
+                               time.localtime(float(message_data["timestamp"])))
         sender_label = ttk.Label(
             header_frame, 
             text=f"From: {message_data['from']} at {time_str}",
@@ -58,7 +60,99 @@ class ChatClient:
         self.setup_gui()
         self.running = True
         threading.Thread(target=self.receive_messages, daemon=True).start()
+
+    def encode_message(self, message):
+        """Encode message using binary format."""
+        encoded_data = b""
+        for key, value in message.items():
+            key_bytes = str(key).encode('utf-8')
+            value_bytes = str(value).encode('utf-8')
+            encoded_data += struct.pack("!H", len(key_bytes))
+            encoded_data += struct.pack("!H", len(value_bytes))
+            encoded_data += key_bytes
+            encoded_data += value_bytes
+
+        # Add total message length prefix
+        message_length = len(encoded_data)
+        return struct.pack("!I", message_length) + encoded_data
+
+    def decode_message(self, data):
+        """Decode binary format message."""
+        message = {}
+        index = 0
         
+        while index < len(data):
+            try:
+                # Get key length
+                key_length = struct.unpack("!H", data[index:index+2])[0]
+                index += 2
+                
+                # Get value length
+                value_length = struct.unpack("!H", data[index:index+2])[0]
+                index += 2
+                
+                # Extract key and value
+                key = data[index:index+key_length].decode('utf-8')
+                index += key_length
+                value = data[index:index+value_length].decode('utf-8')
+                index += value_length
+                
+                # Try to convert numeric strings to numbers
+                try:
+                    if '.' in value:
+                        value = float(value)
+                    else:
+                        value = int(value)
+                except ValueError:
+                    pass
+                    
+                message[key] = value
+            except struct.error:
+                break
+            
+        return message
+
+    def send_command(self, command):
+        """Send command using binary protocol."""
+        command["version"] = "1"  # Version for custom protocol
+        try:
+            encoded_msg = self.encode_message(command)
+            self.socket.sendall(encoded_msg)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to send command: {e}")
+            self.on_connection_lost()
+
+    def receive_messages(self):
+        """Message receiving loop for binary protocol."""
+        while self.running:
+            try:
+                # Get message length first
+                length_bytes = self.socket.recv(4)
+                if not length_bytes:
+                    self.on_connection_lost()
+                    break
+                    
+                msg_length = struct.unpack("!I", length_bytes)[0]
+                
+                # Get the complete message
+                data = b""
+                while len(data) < msg_length:
+                    chunk = self.socket.recv(min(msg_length - len(data), 4096))
+                    if not chunk:
+                        self.on_connection_lost()
+                        return
+                    data += chunk
+                
+                message = self.decode_message(data)
+                if message:
+                    self.root.after(0, self.handle_message, message)
+                    
+            except Exception as e:
+                if self.running:
+                    print(f"Error receiving message: {e}")
+                    self.root.after(0, self.on_connection_lost)
+                break
+
     def setup_gui(self):
         style = ttk.Style()
         style.configure('Bold.TLabel', font=('TkDefaultFont', 9, 'bold'))
@@ -81,7 +175,7 @@ class ChatClient:
         self.status_var = tk.StringVar(value="Not logged in")
         status = ttk.Label(self.root, textvariable=self.status_var)
         status.pack(side='bottom', fill='x', padx=5, pady=2)
-        
+
     def setup_auth_frame(self):
         frame = ttk.LabelFrame(self.auth_frame, text="Authentication", padding=10)
         frame.pack(expand=True, fill='both', padx=10, pady=10)
@@ -99,7 +193,7 @@ class ChatClient:
         ttk.Button(btn_frame, text="Login", command=self.login).pack(side='left', padx=5)
         ttk.Button(btn_frame, text="Create Account", 
                   command=self.create_account).pack(side='left', padx=5)
-        
+
     def setup_chat_frame(self):
         left_frame = ttk.Frame(self.chat_frame)
         left_frame.pack(side='left', fill='both', expand=True)
@@ -200,7 +294,7 @@ class ChatClient:
 
         self.accounts_list.bind('<Double-1>', self.on_user_select)
         
-        send_frame = ttk.LabelFrame(self.accounts_frame, text="Send Message (double click on username to select)", padding=5)
+        send_frame = ttk.LabelFrame(self.accounts_frame, text="Send Message", padding=5)
         send_frame.pack(fill='x', padx=5, pady=5)
         
         to_frame = ttk.Frame(send_frame)
@@ -220,10 +314,6 @@ class ChatClient:
 
         status_frame = ttk.Frame(self.accounts_frame)
         status_frame.pack(fill='x', padx=5, pady=5)
-        
-        # Create container for user counts
-        counts_frame = ttk.Frame(status_frame)
-        counts_frame.pack(side='left', fill='x')
         
         self.user_count_var = tk.StringVar(value="Users found: 0")
         self.online_count_var = tk.StringVar(value="Online users: 0")
@@ -339,7 +429,7 @@ class ChatClient:
             item = self.accounts_list.item(selection[0])
             username = item['values'][0]
             self.recipient_var.set(username)
-            self.notebook.select(1)  # Switch to chat tab
+            self.notebook.select(2)  # Switch to chat tab
 
     def search_accounts(self):
         pattern = self.search_var.get()
@@ -374,44 +464,6 @@ class ChatClient:
     def clear_messages(self):
         for widget in self.messages_frame.winfo_children():
             widget.destroy()
-
-    def send_command(self, command):
-        """Ensure every command includes the version field before sending."""
-        command["version"] = "1.0"  # Add version to every message
-        try:
-            self.socket.send(json.dumps(command).encode())
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to send command: {e}")
-            self.on_connection_lost()
-
-    def receive_messages(self):
-        buffer = ""
-        while self.running:
-            try:
-                data = self.socket.recv(4096).decode()
-                if not data:
-                    self.on_connection_lost()
-                    break
-                    
-                buffer += data
-                
-                # Process complete JSON messages
-                while True:
-                    try:
-                        message_end = buffer.index("}{") if "}{" in buffer else len(buffer)
-                        message = json.loads(buffer[:message_end+1])
-                        buffer = buffer[message_end+1:]
-                        
-                        self.root.after(0, self.handle_message, message)
-                    except ValueError:
-                        # Incomplete message or no more complete messages
-                        break
-                    
-            except Exception as e:
-                if self.running:
-                    print(f"Error receiving message: {e}")
-                    self.root.after(0, self.on_connection_lost)
-                break
 
     def handle_message(self, message):
         if message.get("success"):
