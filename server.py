@@ -1,30 +1,33 @@
 import socket
 import json
+import struct
 import threading
 import hashlib
 import re
 import fnmatch
-from collections import defaultdict
 import time
 import logging
+from collections import defaultdict
 from config import Config
 
-# Configure logging to print to the console or save to a file
-logging.basicConfig(
-    filename="server.log",  # Change to None to print to console instead
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
-
 class ChatServer:
-    def __init__(self, host=None, port=None):
+    def __init__(self, use_json=True):
+        # Determine the correct log file based on the protocol flag
+        log_filename = "json_server.log" if use_json else "custom_server.log"
 
+        # Configure logging to print to the console or save to a file
+        logging.basicConfig(
+            filename=log_filename,  # Change to None to print to console instead
+            level=logging.INFO,
+            format="%(asctime)s - %(levelname)s - %(message)s"
+        )
         #Clear log file on server restart
-        open("server.log", "w").close() # Clears log file
+        open(log_filename, "w").close() # Clears log file
 
         self.config = Config()
-        self.host = host or self.config.get("host")
-        self.port = port or self.config.get("port")
+        self.host = self.config.get("host")
+        self.port = self.config.get("port")
+        self.use_json = use_json  # Choose protocol
         self.users = {}  # username -> (password_hash, settings)
         self.messages = defaultdict(list)  # username -> [messages]
         self.active_users = {}  # username -> connection
@@ -51,30 +54,101 @@ class ChatServer:
         """Get count of messages received while user was offline."""
         return len([msg for msg in self.messages[username] if not msg["read"]])
 
+    def encode_custom(self, message):
+        """Encode message using a compact binary format with length prefix."""
+        encoded_data = b""
+        for key, value in message.items():
+            key_bytes = key.encode('utf-8')
+            value_bytes = str(value).encode('utf-8')
+            encoded_data += struct.pack("!B H", len(key_bytes), len(value_bytes)) + key_bytes + value_bytes
+
+        total_length = len(encoded_data)
+        header = struct.pack("!B B I B", 1, ord(message["cmd"][0]), total_length, 0)
+        full_message = header + encoded_data
+        return struct.pack("!I", len(full_message)) + full_message  # Prepend length
+
+
+    def decode_custom(self, data):
+        """Decode compact binary message format."""
+        version, msg_type, total_length, flags = struct.unpack("!B B I B", data[:7])
+        payload = data[7:]
+
+        message = {"version": version, "cmd": chr(msg_type), "flags": flags}
+        index = 0
+        while index < len(payload):
+            key_len, value_len = struct.unpack("!B H", payload[index:index+3])
+            index += 3
+            key = payload[index:index+key_len].decode('utf-8')
+            index += key_len
+            value = payload[index:index+value_len].decode('utf-8')
+            index += value_len
+            message[key] = value
+        return message
+
+    def send_data(self, client_socket, message):
+        """Send data using selected protocol and log size & time."""
+        start_time = time.monotonic_ns()
+        if self.use_json:
+            encoded_msg = json.dumps(message).encode()
+        else:
+            encoded_msg = self.encode_custom(message)
+
+        client_socket.sendall(encoded_msg)
+        elapsed_time = time.monotonic_ns() - start_time
+        logging.info(f"Sent {len(encoded_msg)} bytes: {message}")
+        logging.info(f"Encoding & Sending took {elapsed_time} ns")
+
+    def receive_data(self, client_socket):
+        """Receive data using selected protocol and log size & time."""
+        start_time = time.monotonic_ns()
+        if self.use_json:
+            data = client_socket.recv(4096).decode()
+            parsed_data = json.loads(data)
+        else:
+            length_bytes = client_socket.recv(4)
+            if not length_bytes:
+                return None
+            msg_length = struct.unpack("!I", length_bytes)[0]
+
+            data = client_socket.recv(msg_length)
+            if len(data) < msg_length:
+                return None  # Ensure complete message received
+
+            parsed_data = self.decode_custom(data)
+
+        elapsed_time = time.monotonic_ns() - start_time
+        logging.info(f"Received {len(data)} bytes: {parsed_data}")
+        logging.info(f"Decoding took {elapsed_time} ns")
+
+        return parsed_data
+
     def handle_client(self, client_socket, address):
         logging.info(f"New connection from {address}")
         current_user = None
 
         while True:
             try:
-                data = client_socket.recv(4096).decode()
-                if not data:
-                    break
+                msg = self.receive_data(client_socket)
+                if not msg:
+                    break                
+                # data = client_socket.recv(4096).decode()
+                # if not data:
+                #     break
 
-                try:
-                    msg = json.loads(data)  # Ensure valid JSON
-                except json.JSONDecodeError:
-                    logging.warning(f"Invalid JSON received from {address}")
-                    response = {"success": False, "error": "Invalid JSON format"}
-                    client_socket.send(json.dumps(response).encode())
-                    continue  
+                # try:
+                #     msg = json.loads(data)  # Ensure valid JSON
+                # except json.JSONDecodeError:
+                #     logging.warning(f"Invalid JSON received from {address}")
+                #     response = {"success": False, "error": "Invalid JSON format"}
+                #     client_socket.send(json.dumps(response).encode())
+                #     continue  
 
                 # Version Check
-                if "version" not in msg or msg["version"] != "1.0":
+                if "version" not in msg or msg["version"] != "1":
                     logging.warning(f"Client {address} sent unsupported version: {msg.get('version')}")
                     response = {"success": False, "error": "Unsupported protocol version"}
-                    client_socket.send(json.dumps(response).encode())
-                    continue  
+                    self.send_data(client_socket, response)
+                    continue   
 
                 # Get the operation code
                 cmd = msg.get("cmd")
@@ -109,7 +183,7 @@ class ChatServer:
                                 "message": "Account created successfully",
                                 "username": username,
                                 "users": users_list
-                            }
+                            } # fix??
 
                     elif cmd == "login":
                         username = msg.get("username")
@@ -151,17 +225,24 @@ class ChatServer:
                                 "success": True,
                                 "users": users_list
                             }
-                            client_socket.send(json.dumps(response).encode())
-                            client_socket.send(json.dumps(user_response).encode())
+                            if self.use_json:
+                                client_socket.send(json.dumps(response).encode())
+                                client_socket.send(json.dumps(user_response).encode())
+                            else:
+                                encoded_response = self.encode_custom(response)
+                                encoded_user_response = self.encode_custom(user_response)
+                                client_socket.send(struct.pack("!I", len(encoded_response)) + encoded_response)
+                                client_socket.send(struct.pack("!I", len(encoded_user_response)) + encoded_user_response)
 
                             # Broadcast updated user list to all active clients
                             for active_client in self.active_users.values():
                                 if active_client != client_socket:
                                     try:
-                                        active_client.send(json.dumps({
-                                            "success": True,
-                                            "users": users_list
-                                        }).encode())
+                                        if self.use_json:
+                                            active_client.send(json.dumps({"success": True, "users": users_list}).encode())
+                                        else:
+                                            encoded_broadcast = self.encode_custom({"success": True, "users": users_list})
+                                            active_client.send(struct.pack("!I", len(encoded_broadcast)) + encoded_broadcast)
                                     except Exception:
                                         pass
 
@@ -203,7 +284,6 @@ class ChatServer:
                                     "content": content,
                                     "timestamp": time.time(),
                                     "read": False,
-                                    "delivered_while_offline": recipient not in self.active_users
                                 }
                                 self.message_id_counter += 1
                                 self.messages[recipient].append(message)
@@ -211,13 +291,18 @@ class ChatServer:
                                 # If recipient is active, send immediately
                                 if recipient in self.active_users:
                                     try:
-                                        self.active_users[recipient].send(json.dumps({
+                                        real_time_message = {
                                             "success": True,
                                             "message_type": "new_message",
                                             "message": message
-                                        }).encode())
+                                        }
+                                        if self.use_json:
+                                            self.active_users[recipient].send(json.dumps(real_time_message).encode())
+                                        else:
+                                            encoded_message = self.encode_custom(real_time_message)
+                                            self.active_users[recipient].send(encoded_message)
                                     except:
-                                        pass  
+                                        pass
 
                                 logging.info(f"Message sent from '{current_user}' to '{recipient}'")
                                 response = {"success": True, "message": "Message sent"}
@@ -312,20 +397,21 @@ class ChatServer:
                             # Notify all active clients about the updated user list
                             for client in self.active_users.values():
                                 try:
-                                    client.send(json.dumps({
-                                        "success": True,
-                                        "users": users_list
-                                    }).encode())
+                                    if self.use_json:
+                                        client.send(json.dumps({"success": True, "users": users_list}).encode())
+                                    else:
+                                        encoded_broadcast = self.encode_custom({"success": True, "users": users_list})
+                                        client.send(struct.pack("!I", len(encoded_broadcast)) + encoded_broadcast)
                                 except:
-                                    pass  # Ignore if a client fails to receive the message
+                                    pass  # Ignore failed sends
 
                             current_user = None
                             response = {"success": True, "message": "Logged out successfully"}
             
-                client_socket.send(json.dumps(response).encode())
+                self.send_data(client_socket, response)
 
             except Exception as e:
-                print(f"Error handling client: {e}")
+                logging.info(f"Error handling client: {e}")
                 break
 
         # When connection is lost or client disconnects
@@ -342,10 +428,11 @@ class ChatServer:
             
             for client in self.active_users.values():
                 try:
-                    client.send(json.dumps({
-                        "success": True,
-                        "users": users_list
-                    }).encode())
+                    if self.use_json:
+                        client.send(json.dumps({"success": True, "users": users_list}).encode())
+                    else:
+                        encoded_broadcast = self.encode_custom({"success": True, "users": users_list})
+                        client.send(struct.pack("!I", len(encoded_broadcast)) + encoded_broadcast)
                 except:
                     pass
         
@@ -363,12 +450,14 @@ class ChatServer:
         # Send to all active clients
         for client in self.active_users.values():
             try:
-                client.send(json.dumps({
-                    "success": True,
-                    "users": users_list
-                }).encode())
+                if self.use_json:
+                    client.send(json.dumps({"success": True, "users": users_list}).encode())
+                else:
+                    encoded_broadcast = self.encode_custom({"success": True, "users": users_list})
+                    client.send(encoded_broadcast)
             except:
-                pass
+                pass  # Ignore failed sends
+
         return users_list
 
     def get_messages(self, username):
@@ -447,6 +536,14 @@ class ChatServer:
 if __name__ == "__main__":
     server = ChatServer()
     try:
+        parser = argparse.ArgumentParser(description="Chat Server")
+        parser.add_argument("--json", action="store_true", help="Use JSON wire protocol")
+        parser.add_argument("--custom", action="store_true", help="Use custom wire protocol")
+
+        args = parser.parse_args()
+        use_json = args.json  # Default to JSON if specified
+
+        server = ChatServer(use_json)
         server.start()
     except KeyboardInterrupt:
         print("\nShutting down server...")
