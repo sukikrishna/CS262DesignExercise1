@@ -50,6 +50,9 @@ class CustomWireProtocol:
             elif isinstance(part, bool):
                 # For boolean values
                 encoded_payload.append(struct.pack('!?', part))
+            elif isinstance(part, int):
+                # For counts and IDs
+                encoded_payload.append(struct.pack('!H', part))
         
         # Combine payload parts
         payload = b''.join(encoded_payload)
@@ -78,7 +81,7 @@ class CustomWireProtocol:
     def decode_success_response(payload):
         """
         Decode a standard success response
-        Returns (success, message, additional_data)
+        Returns (success, message, remaining_payload)
         """
         success = struct.unpack('!?', payload[:1])[0]
         payload = payload[1:]
@@ -535,17 +538,17 @@ class ChatClient:
 
     def handle_message(self, cmd, payload):
         try:
-            # For most commands, we'll use the standard success response decoder
+            # Decode success response
             success, message, remaining_payload = self.protocol.decode_success_response(payload)
             
             if success:
-                # Handle different message types based on cmd and payload
+                # Handle different command responses
                 if cmd == CustomWireProtocol.CMD_LOGIN:
-                    # Login success
-                    self.username = message  # Assuming username is the first decoded string
+                    # Login success - username is the message
+                    self.username = message
                     self.status_var.set(f"Logged in as: {self.username}")
                     self.notebook.select(1)
-                    messagebox.showinfo("Login", f"Successfully logged in")
+                    messagebox.showinfo("Login", "Successfully logged in")
                 
                 elif cmd == CustomWireProtocol.CMD_CREATE:
                     messagebox.showinfo("Account Created", "Account created successfully! Please log in to continue.")
@@ -556,7 +559,7 @@ class ChatClient:
                     while remaining_payload:
                         # Decode username
                         username, remaining_payload = self.protocol.decode_string(remaining_payload)
-                        # Decode status (assumed to be a string)
+                        # Decode status 
                         status, remaining_payload = self.protocol.decode_string(remaining_payload)
                         users.append({"username": username, "status": status})
                     
