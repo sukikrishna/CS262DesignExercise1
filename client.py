@@ -1,11 +1,92 @@
 import socket
-import json
+import struct
 import threading
 import tkinter as tk
 import time
 import argparse
 from tkinter import ttk, messagebox
 from config import Config
+
+class CustomWireProtocol:
+    """
+    Custom wire protocol for message encoding and decoding.
+    Message format:
+    - 4 bytes: Total message length
+    - 2 bytes: Command type (unsigned short)
+    - Remaining bytes: Payload
+    """
+    # Command type constants
+    CMD_CREATE = 1
+    CMD_LOGIN = 2
+    CMD_LIST = 3
+    CMD_SEND = 4
+    CMD_GET_MESSAGES = 5
+    CMD_GET_UNDELIVERED = 6
+    CMD_DELETE_MESSAGES = 7
+    CMD_DELETE_ACCOUNT = 8
+    CMD_LOGOUT = 9
+
+    @staticmethod
+    def encode_message(cmd, payload_parts):
+        """
+        Encode a message for transmission
+        payload_parts should be a list of bytes or strings to be encoded
+        """
+        # Encode each payload part
+        encoded_payload = []
+        for part in payload_parts:
+            if isinstance(part, str):
+                # Encode string with length prefix
+                encoded_str = part.encode('utf-8')
+                encoded_payload.append(struct.pack('!H', len(encoded_str)))
+                encoded_payload.append(encoded_str)
+            elif isinstance(part, bytes):
+                encoded_payload.append(part)
+            elif isinstance(part, list):
+                # For list of message IDs
+                encoded_payload.append(struct.pack('!H', len(part)))
+                for item in part:
+                    encoded_payload.append(struct.pack('!I', item))
+            elif isinstance(part, bool):
+                # For boolean values
+                encoded_payload.append(struct.pack('!?', part))
+        
+        # Combine payload parts
+        payload = b''.join(encoded_payload)
+        
+        # Pack total length (4 bytes), command (2 bytes), then payload
+        header = struct.pack('!IH', len(payload) + 6, cmd)
+        return header + payload
+
+    @staticmethod
+    def decode_message(data):
+        """
+        Decode an incoming message
+        Returns (total_length, command, payload)
+        """
+        total_length, cmd = struct.unpack('!IH', data[:6])
+        payload = data[6:total_length]
+        return total_length, cmd, payload
+
+    @staticmethod
+    def decode_string(data):
+        """Decode a length-prefixed string"""
+        length = struct.unpack('!H', data[:2])[0]
+        return data[2:2+length].decode('utf-8'), data[2+length:]
+
+    @staticmethod
+    def decode_success_response(payload):
+        """
+        Decode a standard success response
+        Returns (success, message, additional_data)
+        """
+        success = struct.unpack('!?', payload[:1])[0]
+        payload = payload[1:]
+        
+        # Decode message string
+        message, payload = CustomWireProtocol.decode_string(payload)
+        
+        return success, message, payload
 
 class MessageFrame(ttk.Frame):
     def __init__(self, parent, message_data, on_select=None):
@@ -40,13 +121,15 @@ class MessageFrame(ttk.Frame):
 class ChatClient:
     def __init__(self, host):
         self.root = tk.Tk()
-        self.root.title("Chat Application")
+        self.root.title("Chat Application (Custom Wire Protocol)")
         self.root.geometry("1000x800")
         
         self.config = Config()
         self.host = host
         self.port = self.config.get("port")
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.protocol = CustomWireProtocol()
+        
         try:
             self.socket.connect((self.host, self.port))
         except ConnectionRefusedError:
@@ -81,7 +164,7 @@ class ChatClient:
         self.status_var = tk.StringVar(value="Not logged in")
         status = ttk.Label(self.root, textvariable=self.status_var)
         status.pack(side='bottom', fill='x', padx=5, pady=2)
-        
+
     def setup_auth_frame(self):
         frame = ttk.LabelFrame(self.auth_frame, text="Authentication", padding=10)
         frame.pack(expand=True, fill='both', padx=10, pady=10)
@@ -99,7 +182,7 @@ class ChatClient:
         ttk.Button(btn_frame, text="Login", command=self.login).pack(side='left', padx=5)
         ttk.Button(btn_frame, text="Create Account", 
                   command=self.create_account).pack(side='left', padx=5)
-        
+
     def setup_chat_frame(self):
         left_frame = ttk.Frame(self.chat_frame)
         left_frame.pack(side='left', fill='both', expand=True)
@@ -240,11 +323,17 @@ class ChatClient:
             messagebox.showwarning("Warning", "Please enter username and password")
             return
         
-        self.send_command({
-            "cmd": "create",
-            "username": username,
-            "password": password
-        })
+        # Encode create account message using custom wire protocol
+        message = self.protocol.encode_message(
+            CustomWireProtocol.CMD_CREATE, 
+            [username, password]
+        )
+        
+        try:
+            self.socket.send(message)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to send create account request: {e}")
+            self.on_connection_lost()
 
     def login(self):
         username = self.username_entry.get()
@@ -254,11 +343,17 @@ class ChatClient:
             messagebox.showwarning("Warning", "Please enter username and password")
             return
         
-        self.send_command({
-            "cmd": "login",
-            "username": username,
-            "password": password
-        })
+        # Encode login message using custom wire protocol
+        message = self.protocol.encode_message(
+            CustomWireProtocol.CMD_LOGIN, 
+            [username, password]
+        )
+        
+        try:
+            self.socket.send(message)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to send login request: {e}")
+            self.on_connection_lost()
 
     def send_message(self):
         if not self.username:
@@ -271,26 +366,36 @@ class ChatClient:
         if not recipient or not message:
             messagebox.showwarning("Warning", "Please enter recipient and message")
             return
-            
-        self.send_command({
-            "cmd": "send",
-            "to": recipient,
-            "content": message
-        })
         
-        self.message_text.delete("1.0", tk.END)
+        # Encode send message using custom wire protocol
+        message_payload = self.protocol.encode_message(
+            CustomWireProtocol.CMD_SEND, 
+            [recipient, message]
+        )
+        
+        try:
+            self.socket.send(message_payload)
+            self.message_text.delete("1.0", tk.END)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to send message: {e}")
+            self.on_connection_lost()
 
-    def delete_message(self, msg_id):
-        if messagebox.askyesno("Confirm", "Delete this message?"):
-            self.send_command({
-                "cmd": "delete_messages",
-                "message_ids": [msg_id]
-            })
-            # Remove the message frame immediately
-            for widget in self.messages_frame.winfo_children():
-                if isinstance(widget, MessageFrame) and getattr(widget, 'message_id', None) == msg_id:
-                    widget.destroy()
-                    break
+    def search_accounts(self):
+        pattern = self.search_var.get()
+        if pattern and not pattern.endswith("*"):
+            pattern = pattern + "*"
+        
+        # Encode list accounts message
+        message = self.protocol.encode_message(
+            CustomWireProtocol.CMD_LIST, 
+            [pattern]
+        )
+        
+        try:
+            self.socket.send(message)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to search accounts: {e}")
+            self.on_connection_lost()
 
     def delete_selected_messages(self):
         selected_ids = []
@@ -300,55 +405,21 @@ class ChatClient:
         
         if selected_ids:
             if messagebox.askyesno("Confirm", f"Delete {len(selected_ids)} selected messages?"):
-                self.send_command({
-                    "cmd": "delete_messages",
-                    "message_ids": selected_ids
-                })
-                # Remove the message frames immediately
-                for widget in self.messages_frame.winfo_children():
-                    if isinstance(widget, MessageFrame) and widget.message_id in selected_ids:
-                        widget.destroy()
-
-    def refresh_messages(self):
-        """Get all messages for history view"""
-        try:
-            count = int(self.msg_count.get())
-        except ValueError:
-            count = self.config.get("message_fetch_limit")
+                # Encode delete messages
+                message = self.protocol.encode_message(
+                    CustomWireProtocol.CMD_DELETE_MESSAGES, 
+                    [selected_ids]
+                )
                 
-        self.send_command({
-            "cmd": "get_messages",
-            "count": count
-        })
-
-    def refresh_unread_messages(self):
-        """Get only undelivered messages"""
-        try:
-            count = int(self.msg_count.get())
-        except ValueError:
-            count = self.config.get("message_fetch_limit") 
-                
-        self.send_command({
-            "cmd": "get_undelivered",
-            "count": count
-        })
-
-    def on_user_select(self, event):
-        selection = self.accounts_list.selection()
-        if selection:
-            item = self.accounts_list.item(selection[0])
-            username = item['values'][0]
-            self.recipient_var.set(username)
-            self.notebook.select(1)  # Switch to chat tab
-
-    def search_accounts(self):
-        pattern = self.search_var.get()
-        if pattern and not pattern.endswith("*"):
-            pattern = pattern + "*"
-        self.send_command({
-            "cmd": "list",
-            "pattern": pattern
-        })
+                try:
+                    self.socket.send(message)
+                    # Remove the message frames immediately
+                    for widget in self.messages_frame.winfo_children():
+                        if isinstance(widget, MessageFrame) and widget.message_id in selected_ids:
+                            widget.destroy()
+                except Exception as e:
+                    messagebox.showerror("Error", f"Failed to delete messages: {e}")
+                    self.on_connection_lost()
 
     def delete_account(self):
         if not self.username:
@@ -362,50 +433,99 @@ class ChatClient:
             
         if messagebox.askyesno("Confirm", 
                               "Delete your account? This cannot be undone."):
-            self.send_command({
-                "cmd": "delete_account",
-                "password": password
-            })
+            # Encode delete account message
+            message = self.protocol.encode_message(
+                CustomWireProtocol.CMD_DELETE_ACCOUNT, 
+                [password]
+            )
+            
+            try:
+                self.socket.send(message)
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to delete account: {e}")
+                self.on_connection_lost()
 
     def logout(self):
         if self.username:
-            self.send_command({"cmd": "logout"})
+            # Encode logout message
+            message = self.protocol.encode_message(
+                CustomWireProtocol.CMD_LOGOUT, 
+                []
+            )
+            
+            try:
+                self.socket.send(message)
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to logout: {e}")
+                self.on_connection_lost()
 
-    def clear_messages(self):
-        for widget in self.messages_frame.winfo_children():
-            widget.destroy()
-
-    def send_command(self, command):
-        """Ensure every command includes the version field before sending."""
-        command["version"] = "1.0"  # Add version to every message
+    def refresh_messages(self):
+        """Get all messages for history view"""
         try:
-            self.socket.send(json.dumps(command).encode())
+            count = int(self.msg_count.get())
+        except ValueError:
+            count = self.config.get("message_fetch_limit")
+        
+        # Encode get messages request
+        message = self.protocol.encode_message(
+            CustomWireProtocol.CMD_GET_MESSAGES, 
+            [count]
+        )
+        
+        try:
+            self.socket.send(message)
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to send command: {e}")
+            messagebox.showerror("Error", f"Failed to get messages: {e}")
+            self.on_connection_lost()
+
+    def refresh_unread_messages(self):
+        """Get only undelivered messages"""
+        try:
+            count = int(self.msg_count.get())
+        except ValueError:
+            count = self.config.get("message_fetch_limit")
+        
+        # Encode get unread messages request
+        message = self.protocol.encode_message(
+            CustomWireProtocol.CMD_GET_UNDELIVERED, 
+            [count]
+        )
+        
+        try:
+            self.socket.send(message)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to get unread messages: {e}")
             self.on_connection_lost()
 
     def receive_messages(self):
-        buffer = ""
+        buffer = b''
         while self.running:
             try:
-                data = self.socket.recv(4096).decode()
-                if not data:
+                chunk = self.socket.recv(4096)
+                if not chunk:
                     self.on_connection_lost()
                     break
                     
-                buffer += data
+                buffer += chunk
                 
-                # Process complete JSON messages
-                while True:
-                    try:
-                        message_end = buffer.index("}{") if "}{" in buffer else len(buffer)
-                        message = json.loads(buffer[:message_end+1])
-                        buffer = buffer[message_end+1:]
-                        
-                        self.root.after(0, self.handle_message, message)
-                    except ValueError:
-                        # Incomplete message or no more complete messages
+                # Process complete messages
+                while len(buffer) >= 6:
+                    # Peek at message length
+                    total_length = struct.unpack('!I', buffer[:4])[0]
+                    
+                    # Check if we have a complete message
+                    if len(buffer) < total_length:
                         break
+                    
+                    # Extract full message
+                    message_data = buffer[:total_length]
+                    buffer = buffer[total_length:]
+                    
+                    # Decode message
+                    _, cmd, payload = self.protocol.decode_message(message_data)
+                    
+                    # Process the message
+                    self.root.after(0, self.handle_message, cmd, payload)
                     
             except Exception as e:
                 if self.running:
@@ -413,55 +533,127 @@ class ChatClient:
                     self.root.after(0, self.on_connection_lost)
                 break
 
-    def handle_message(self, message):
-        if message.get("success"):
-            if "username" in message:
-                if "unread" in message:
-                    self.username = message["username"]
+    def handle_message(self, cmd, payload):
+        try:
+            # For most commands, we'll use the standard success response decoder
+            success, message, remaining_payload = self.protocol.decode_success_response(payload)
+            
+            if success:
+                # Handle different message types based on cmd and payload
+                if cmd == CustomWireProtocol.CMD_LOGIN:
+                    # Login success
+                    self.username = message  # Assuming username is the first decoded string
                     self.status_var.set(f"Logged in as: {self.username}")
                     self.notebook.select(1)
-                    messagebox.showinfo("Messages", f"You have {message['unread']} unread messages")
-                else:
+                    messagebox.showinfo("Login", f"Successfully logged in")
+                
+                elif cmd == CustomWireProtocol.CMD_CREATE:
                     messagebox.showinfo("Account Created", "Account created successfully! Please log in to continue.")
-            elif message.get("message_type") == "new_message":
-                messagebox.showinfo("New Message", 
-                    f"New message from {message['message']['from']}")
-                    
-            elif "messages" in message:
-                self.clear_messages()
-                for msg in message["messages"]:
-                    frame = MessageFrame(self.messages_frame, msg)
-                    frame.message_id = msg["id"]
-                    frame.pack(fill='x', padx=5, pady=2)
-                    
-            elif "users" in message:
-                self.accounts_list.delete(*self.accounts_list.get_children())
                 
-                for user in message["users"]:
-                    username = user["username"]
-                    status = user["status"]
-                    self.accounts_list.insert("", "end", values=(username, status))
+                elif cmd == CustomWireProtocol.CMD_LIST:
+                    # Decode list of users
+                    users = []
+                    while remaining_payload:
+                        # Decode username
+                        username, remaining_payload = self.protocol.decode_string(remaining_payload)
+                        # Decode status (assumed to be a string)
+                        status, remaining_payload = self.protocol.decode_string(remaining_payload)
+                        users.append({"username": username, "status": status})
+                    
+                    # Update accounts list
+                    self.accounts_list.delete(*self.accounts_list.get_children())
+                    for user in users:
+                        self.accounts_list.insert("", "end", values=(user["username"], user["status"]))
+                    
+                    # Update both total and online user counts
+                    total_users = len(users)
+                    online_users = sum(1 for user in users if user['status'] == 'online')
+                    self.user_count_var.set(f"Users found: {total_users}")
+                    self.online_count_var.set(f"Online users: {online_users}")
                 
-                # Update both total and online user counts
-                total_users = len(message['users'])
-                online_users = sum(1 for user in message['users'] if user['status'] == 'online')
-                self.user_count_var.set(f"Users found: {total_users}")
-                self.online_count_var.set(f"Online users: {online_users}")
+                elif cmd == CustomWireProtocol.CMD_GET_MESSAGES or cmd == CustomWireProtocol.CMD_GET_UNDELIVERED:
+                    # Decode messages
+                    messages = []
+                    while remaining_payload:
+                        # Decode message ID
+                        msg_id = struct.unpack('!I', remaining_payload[:4])[0]
+                        remaining_payload = remaining_payload[4:]
+                        
+                        # Decode sender
+                        sender, remaining_payload = self.protocol.decode_string(remaining_payload)
+                        
+                        # Decode content
+                        content, remaining_payload = self.protocol.decode_string(remaining_payload)
+                        
+                        # Decode timestamp
+                        timestamp = struct.unpack('!d', remaining_payload[:8])[0]
+                        remaining_payload = remaining_payload[8:]
+                        
+                        messages.append({
+                            "id": msg_id,
+                            "from": sender,
+                            "content": content,
+                            "timestamp": timestamp
+                        })
                     
-            elif message.get("message") == "Logged out successfully":
-                self.username = None
-                self.status_var.set("Not logged in")
-                self.notebook.select(0)
-                self.clear_messages()
+                    # Clear existing messages
+                    self.clear_messages()
                     
-            elif message.get("message") == "Account deleted":
-                self.username = None
-                self.status_var.set("Not logged in")
-                self.notebook.select(0)
-                self.clear_messages()
-                messagebox.showinfo("Success", "Account deleted successfully")
-        else:
-            messagebox.showerror("Error", message.get("message", "Unknown error occurred"))
+                    # Display messages
+                    for msg in messages:
+                        frame = MessageFrame(self.messages_frame, msg)
+                        frame.pack(fill='x', padx=5, pady=2)
+                
+                elif cmd == CustomWireProtocol.CMD_LOGOUT:
+                    self.username = None
+                    self.status_var.set("Not logged in")
+                    self.notebook.select(0)
+                    self.clear_messages()
+                    messagebox.showinfo("Logout", "Logged out successfully")
+                
+                elif cmd == CustomWireProtocol.CMD_DELETE_ACCOUNT:
+                    self.username = None
+                    self.status_var.set("Not logged in")
+                    self.notebook.select(0)
+                    self.clear_messages()
+                    messagebox.showinfo("Success", "Account deleted successfully")
+            
+            else:
+                # Handle error cases
+                messagebox.showerror("Error", message)
+        
+        except Exception as e:
+            messagebox.showerror("Error", f"Error processing message: {e}")
+
+    def clear_messages(self):
+        for widget in self.messages_frame.winfo_children():
+            widget.destroy()
+
+    def on_user_select(self, event):
+        selection = self.accounts_list.selection()
+        if selection:
+            item = self.accounts_list.item(selection[0])
+            username = item['values'][0]
+            self.recipient_var.set(username)
+            self.notebook.select(1)  # Switch to chat tab
+
+    def on_closing(self):
+        self.running = False
+        if self.username:
+            try:
+                # Encode logout message
+                message = self.protocol.encode_message(
+                    CustomWireProtocol.CMD_LOGOUT, 
+                    []
+                )
+                self.socket.send(message)
+            except:
+                pass
+        try:
+            self.socket.close()
+        except:
+            pass
+        self.root.destroy()
 
     def on_connection_lost(self):
         if self.running:
@@ -480,21 +672,8 @@ class ChatClient:
         self.search_accounts()
         self.root.mainloop()
 
-    def on_closing(self):
-        self.running = False
-        if self.username:
-            try:
-                self.logout()
-            except:
-                pass
-        try:
-            self.socket.close()
-        except:
-            pass
-        self.root.destroy()
-
 def main():
-    parser = argparse.ArgumentParser(description="Chat Client")
+    parser = argparse.ArgumentParser(description="Chat Client (Custom Wire Protocol)")
     parser.add_argument("host", help="Server IP or hostname")
     args = parser.parse_args()
 
