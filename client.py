@@ -4,8 +4,21 @@ import threading
 import tkinter as tk
 import time
 import argparse
+import struct
 from tkinter import ttk, messagebox
 from config import Config
+
+class MessageType:
+    CREATE_ACCOUNT = 1
+    LOGIN = 2
+    LIST_ACCOUNTS = 3
+    SEND_MESSAGE = 4
+    GET_MESSAGES = 5
+    GET_UNDELIVERED = 6
+    DELETE_MESSAGES = 7
+    DELETE_ACCOUNT = 8
+    LOGOUT = 9
+    RESPONSE = 10
 
 class MessageFrame(ttk.Frame):
     def __init__(self, parent, message_data, on_select=None):
@@ -58,8 +71,21 @@ class ChatClient:
         self.setup_gui()
         self.running = True
         threading.Thread(target=self.receive_messages, daemon=True).start()
-        
+
+    def pack_message(self, msg_type, data=""):
+        """Pack message into binary format"""
+        data_bytes = data.encode() if isinstance(data, str) else data
+        header = struct.pack("!BBI", msg_type, 1, len(data_bytes))
+        return header + data_bytes
+
+    def unpack_message(self, data):
+        """Unpack binary message"""
+        msg_type, success, length = struct.unpack("!BBI", data[:6])
+        payload = data[6:6+length].decode() if length > 0 else ""
+        return msg_type, bool(success), payload
+
     def setup_gui(self):
+        # [All GUI setup code remains exactly the same as your JSON version]
         style = ttk.Style()
         style.configure('Bold.TLabel', font=('TkDefaultFont', 9, 'bold'))
         
@@ -99,7 +125,7 @@ class ChatClient:
         ttk.Button(btn_frame, text="Login", command=self.login).pack(side='left', padx=5)
         ttk.Button(btn_frame, text="Create Account", 
                   command=self.create_account).pack(side='left', padx=5)
-        
+
     def setup_chat_frame(self):
         left_frame = ttk.Frame(self.chat_frame)
         left_frame.pack(side='left', fill='both', expand=True)
@@ -129,7 +155,7 @@ class ChatClient:
         controls = ttk.LabelFrame(right_frame, text="Message Controls", padding=5)
         controls.pack(fill='x', pady=5)
         
-        ttk.Label(controls, text="Unread messages to fetch:").pack()
+        ttk.Label(controls, text="Messages to fetch:").pack()
         self.msg_count = ttk.Entry(controls, width=5)
         self.msg_count.insert(0, self.config.get("message_fetch_limit"))
         self.msg_count.pack()
@@ -200,7 +226,7 @@ class ChatClient:
 
         self.accounts_list.bind('<Double-1>', self.on_user_select)
         
-        send_frame = ttk.LabelFrame(self.accounts_frame, text="Send Message (double click on username to select)", padding=5)
+        send_frame = ttk.LabelFrame(self.accounts_frame, text="Send Message", padding=5)
         send_frame.pack(fill='x', padx=5, pady=5)
         
         to_frame = ttk.Frame(send_frame)
@@ -221,10 +247,6 @@ class ChatClient:
         status_frame = ttk.Frame(self.accounts_frame)
         status_frame.pack(fill='x', padx=5, pady=5)
         
-        # Create container for user counts
-        counts_frame = ttk.Frame(status_frame)
-        counts_frame.pack(side='left', fill='x')
-        
         self.user_count_var = tk.StringVar(value="Users found: 0")
         self.online_count_var = tk.StringVar(value="Online users: 0")
         
@@ -240,11 +262,18 @@ class ChatClient:
             messagebox.showwarning("Warning", "Please enter username and password")
             return
         
-        self.send_command({
-            "cmd": "create",
-            "username": username,
-            "password": password
-        })
+        message = self.pack_message(MessageType.CREATE_ACCOUNT, f"{username}:{password}")
+        try:
+            self.socket.send(message)
+            response_data = self.socket.recv(1024)
+            msg_type, success, payload = self.unpack_message(response_data)
+            
+            if success:
+                messagebox.showinfo("Success", "Account created successfully! Please log in.")
+            else:
+                messagebox.showerror("Error", payload)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to create account: {e}")
 
     def login(self):
         username = self.username_entry.get()
@@ -254,11 +283,23 @@ class ChatClient:
             messagebox.showwarning("Warning", "Please enter username and password")
             return
         
-        self.send_command({
-            "cmd": "login",
-            "username": username,
-            "password": password
-        })
+        message = self.pack_message(MessageType.LOGIN, f"{username}:{password}")
+        try:
+            self.socket.send(message)
+            response_data = self.socket.recv(1024)
+            msg_type, success, payload = self.unpack_message(response_data)
+            
+            if success:
+                username, unread_count = payload.split(":")
+                self.username = username
+                self.status_var.set(f"Logged in as: {self.username}")
+                self.notebook.select(1)  # Switch to users tab
+                messagebox.showinfo("Login Successful", f"You have {unread_count} unread messages")
+                self.search_accounts()  # Refresh user list
+            else:
+                messagebox.showerror("Error", payload)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to login: {e}")
 
     def send_message(self):
         if not self.username:
@@ -272,25 +313,109 @@ class ChatClient:
             messagebox.showwarning("Warning", "Please enter recipient and message")
             return
             
-        self.send_command({
-            "cmd": "send",
-            "to": recipient,
-            "content": message
-        })
-        
-        self.message_text.delete("1.0", tk.END)
+        message_data = self.pack_message(MessageType.SEND_MESSAGE, f"{recipient}:{message}")
+        try:
+            self.socket.send(message_data)
+            response_data = self.socket.recv(1024)
+            msg_type, success, payload = self.unpack_message(response_data)
+            
+            if success:
+                self.message_text.delete("1.0", tk.END)
+            else:
+                messagebox.showerror("Error", payload)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to send message: {e}")
 
-    def delete_message(self, msg_id):
-        if messagebox.askyesno("Confirm", "Delete this message?"):
-            self.send_command({
-                "cmd": "delete_messages",
-                "message_ids": [msg_id]
-            })
-            # Remove the message frame immediately
-            for widget in self.messages_frame.winfo_children():
-                if isinstance(widget, MessageFrame) and getattr(widget, 'message_id', None) == msg_id:
-                    widget.destroy()
-                    break
+    def refresh_messages(self):
+        try:
+            count = int(self.msg_count.get())
+        except ValueError:
+            count = self.config.get("message_fetch_limit")
+                
+        message = self.pack_message(MessageType.GET_MESSAGES, str(count))
+        try:
+            self.socket.send(message)
+            response_data = self.socket.recv(4096)  # Larger buffer for messages
+            msg_type, success, payload = self.unpack_message(response_data)
+            
+            if success:
+                self.clear_messages()
+                if payload:
+                    messages = payload.split("|")
+                    for msg_str in messages:
+                        msg_id, sender, content, timestamp = msg_str.split(":", 3)
+                        message_data = {
+                            "id": int(msg_id),
+                            "from": sender,
+                            "content": content,
+                            "timestamp": float(timestamp)
+                        }
+                        frame = MessageFrame(self.messages_frame, message_data)
+                        frame.pack(fill='x', padx=5, pady=2)
+            else:
+                messagebox.showerror("Error", payload)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to fetch messages: {e}")
+
+    def refresh_unread_messages(self):
+        try:
+            count = int(self.msg_count.get())
+        except ValueError:
+            count = self.config.get("message_fetch_limit")
+                
+        message = self.pack_message(MessageType.GET_UNDELIVERED, str(count))
+        try:
+            self.socket.send(message)
+            response_data = self.socket.recv(4096)
+            msg_type, success, payload = self.unpack_message(response_data)
+            
+            if success:
+                self.clear_messages()
+                if payload:
+                    messages = payload.split("|")
+                    for msg_str in messages:
+                        msg_id, sender, content, timestamp = msg_str.split(":", 3)
+                        message_data = {
+                            "id": int(msg_id),
+                            "from": sender,
+                            "content": content,
+                            "timestamp": float(timestamp)
+                        }
+                        frame = MessageFrame(self.messages_frame, message_data)
+                        frame.pack(fill='x', padx=5, pady=2)
+            else:
+                messagebox.showerror("Error", payload)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to fetch unread messages: {e}")
+
+    def search_accounts(self):
+        pattern = self.search_var.get()
+        if pattern and not pattern.endswith("*"):
+            pattern = pattern + "*"
+            
+        message = self.pack_message(MessageType.LIST_ACCOUNTS, pattern)
+        try:
+            self.socket.send(message)
+            response_data = self.socket.recv(4096)
+            msg_type, success, payload = self.unpack_message(response_data)
+            
+            if success:
+                self.accounts_list.delete(*self.accounts_list.get_children())
+                if payload:
+                    users = payload.split("|")
+                    online_count = 0
+                    for user_str in users:
+                        username, status = user_str.split(":")
+                        self.accounts_list.insert("", "end", values=(username, status))
+                        if status == "online":
+                            online_count += 1
+                    
+                    self.user_count_var.set(f"Users found: {len(users)}")
+                    self.online_count_var.set(f"Online users: {online_count}")
+            else:
+                messagebox.showerror("Error", payload)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to fetch user list: {e}")
 
     def delete_selected_messages(self):
         selected_ids = []
@@ -300,55 +425,22 @@ class ChatClient:
         
         if selected_ids:
             if messagebox.askyesno("Confirm", f"Delete {len(selected_ids)} selected messages?"):
-                self.send_command({
-                    "cmd": "delete_messages",
-                    "message_ids": selected_ids
-                })
-                # Remove the message frames immediately
-                for widget in self.messages_frame.winfo_children():
-                    if isinstance(widget, MessageFrame) and widget.message_id in selected_ids:
-                        widget.destroy()
-
-    def refresh_messages(self):
-        """Get all messages for history view"""
-        try:
-            count = int(self.msg_count.get())
-        except ValueError:
-            count = self.config.get("message_fetch_limit")
-                
-        self.send_command({
-            "cmd": "get_messages",
-            "count": count
-        })
-
-    def refresh_unread_messages(self):
-        """Get only undelivered messages"""
-        try:
-            count = int(self.msg_count.get())
-        except ValueError:
-            count = self.config.get("message_fetch_limit") 
-                
-        self.send_command({
-            "cmd": "get_undelivered",
-            "count": count
-        })
-
-    def on_user_select(self, event):
-        selection = self.accounts_list.selection()
-        if selection:
-            item = self.accounts_list.item(selection[0])
-            username = item['values'][0]
-            self.recipient_var.set(username)
-            self.notebook.select(1)  # Switch to chat tab
-
-    def search_accounts(self):
-        pattern = self.search_var.get()
-        if pattern and not pattern.endswith("*"):
-            pattern = pattern + "*"
-        self.send_command({
-            "cmd": "list",
-            "pattern": pattern
-        })
+                message = self.pack_message(MessageType.DELETE_MESSAGES, 
+                                         ",".join(str(id) for id in selected_ids))
+                try:
+                    self.socket.send(message)
+                    response_data = self.socket.recv(1024)
+                    msg_type, success, payload = self.unpack_message(response_data)
+                    
+                    if success:
+                        # Remove the message frames
+                        for widget in self.messages_frame.winfo_children():
+                            if isinstance(widget, MessageFrame) and widget.message_id in selected_ids:
+                                widget.destroy()
+                    else:
+                        messagebox.showerror("Error", payload)
+                except Exception as e:
+                    messagebox.showerror("Error", f"Failed to delete messages: {e}")
 
     def delete_account(self):
         if not self.username:
@@ -362,106 +454,95 @@ class ChatClient:
             
         if messagebox.askyesno("Confirm", 
                               "Delete your account? This cannot be undone."):
-            self.send_command({
-                "cmd": "delete_account",
-                "password": password
-            })
+            message = self.pack_message(MessageType.DELETE_ACCOUNT, password)
+            try:
+                self.socket.send(message)
+                response_data = self.socket.recv(1024)
+                msg_type, success, payload = self.unpack_message(response_data)
+                
+                if success:
+                    self.username = None
+                    self.status_var.set("Not logged in")
+                    self.notebook.select(0)
+                    self.clear_messages()
+                    messagebox.showinfo("Success", "Account deleted successfully")
+                else:
+                    messagebox.showerror("Error", payload)
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to delete account: {e}")
 
     def logout(self):
         if self.username:
-            self.send_command({"cmd": "logout"})
+            message = self.pack_message(MessageType.LOGOUT)
+            try:
+                self.socket.send(message)
+                response_data = self.socket.recv(1024)
+                msg_type, success, payload = self.unpack_message(response_data)
+                
+                if success:
+                    self.username = None
+                    self.status_var.set("Not logged in")
+                    self.notebook.select(0)
+                    self.clear_messages()
+                else:
+                    messagebox.showerror("Error", payload)
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to logout: {e}")
+
+    def on_user_select(self, event):
+        selection = self.accounts_list.selection()
+        if selection:
+            item = self.accounts_list.item(selection[0])
+            username = item['values'][0]
+            self.recipient_var.set(username)
+            self.notebook.select(2)  # Switch to chat tab
 
     def clear_messages(self):
         for widget in self.messages_frame.winfo_children():
             widget.destroy()
 
-    def send_command(self, command):
-        """Ensure every command includes the version field before sending."""
-        command["version"] = "1.0"  # Add version to every message
-        try:
-            self.socket.send(json.dumps(command).encode())
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to send command: {e}")
-            self.on_connection_lost()
-
     def receive_messages(self):
-        buffer = ""
+        """Handle incoming messages from server"""
         while self.running:
             try:
-                data = self.socket.recv(4096).decode()
-                if not data:
+                # Receive header
+                header = self.socket.recv(6)
+                if not header or len(header) < 6:
                     self.on_connection_lost()
                     break
-                    
-                buffer += data
+
+                msg_type, success, length = struct.unpack("!BBI", header)
                 
-                # Process complete JSON messages
-                while True:
-                    try:
-                        message_end = buffer.index("}{") if "}{" in buffer else len(buffer)
-                        message = json.loads(buffer[:message_end+1])
-                        buffer = buffer[message_end+1:]
-                        
-                        self.root.after(0, self.handle_message, message)
-                    except ValueError:
-                        # Incomplete message or no more complete messages
+                # Receive payload if any
+                payload = b""
+                while length > 0:
+                    chunk = self.socket.recv(min(length, 4096))
+                    if not chunk:
                         break
-                    
+                    payload += chunk
+                    length -= len(chunk)
+
+                if length > 0:  # Incomplete message
+                    self.on_connection_lost()
+                    break
+
+                payload = payload.decode() if payload else ""
+
+                # Handle incoming message based on type
+                if msg_type == MessageType.SEND_MESSAGE:
+                    sender, content = payload.split(":", 1)
+                    self.root.after(0, lambda: messagebox.showinfo("New Message", 
+                        f"New message from {sender}"))
+                
+                elif msg_type == MessageType.RESPONSE:
+                    if not success:
+                        self.root.after(0, lambda: messagebox.showerror("Error", payload))
+                        
             except Exception as e:
                 if self.running:
                     print(f"Error receiving message: {e}")
                     self.root.after(0, self.on_connection_lost)
                 break
-
-    def handle_message(self, message):
-        if message.get("success"):
-            if "username" in message:
-                if "unread" in message:
-                    self.username = message["username"]
-                    self.status_var.set(f"Logged in as: {self.username}")
-                    self.notebook.select(1)
-                    messagebox.showinfo("Messages", f"You have {message['unread']} unread messages")
-                else:
-                    messagebox.showinfo("Account Created", "Account created successfully! Please log in to continue.")
-            elif message.get("message_type") == "new_message":
-                messagebox.showinfo("New Message", 
-                    f"New message from {message['message']['from']}")
-                    
-            elif "messages" in message:
-                self.clear_messages()
-                for msg in message["messages"]:
-                    frame = MessageFrame(self.messages_frame, msg)
-                    frame.message_id = msg["id"]
-                    frame.pack(fill='x', padx=5, pady=2)
-                    
-            elif "users" in message:
-                self.accounts_list.delete(*self.accounts_list.get_children())
-                
-                for user in message["users"]:
-                    username = user["username"]
-                    status = user["status"]
-                    self.accounts_list.insert("", "end", values=(username, status))
-                
-                # Update both total and online user counts
-                total_users = len(message['users'])
-                online_users = sum(1 for user in message['users'] if user['status'] == 'online')
-                self.user_count_var.set(f"Users found: {total_users}")
-                self.online_count_var.set(f"Online users: {online_users}")
-                    
-            elif message.get("message") == "Logged out successfully":
-                self.username = None
-                self.status_var.set("Not logged in")
-                self.notebook.select(0)
-                self.clear_messages()
-                    
-            elif message.get("message") == "Account deleted":
-                self.username = None
-                self.status_var.set("Not logged in")
-                self.notebook.select(0)
-                self.clear_messages()
-                messagebox.showinfo("Success", "Account deleted successfully")
-        else:
-            messagebox.showerror("Error", message.get("message", "Unknown error occurred"))
 
     def on_connection_lost(self):
         if self.running:
