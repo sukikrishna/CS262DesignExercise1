@@ -546,9 +546,11 @@ class ChatClient:
                 if cmd == CustomWireProtocol.CMD_LOGIN:
                     # Login success - username is the message
                     self.username = message
+                    # Decode unread count
+                    unread_count = struct.unpack('!H', remaining_payload)[0] if remaining_payload else 0
                     self.status_var.set(f"Logged in as: {self.username}")
                     self.notebook.select(1)
-                    messagebox.showinfo("Login", "Successfully logged in")
+                    messagebox.showinfo("Login", f"Successfully logged in. {unread_count} unread messages.")
                 
                 elif cmd == CustomWireProtocol.CMD_CREATE:
                     messagebox.showinfo("Account Created", "Account created successfully! Please log in to continue.")
@@ -578,6 +580,10 @@ class ChatClient:
                     # Decode messages
                     messages = []
                     while remaining_payload:
+                        # Ensure enough bytes for message ID
+                        if len(remaining_payload) < 4:
+                            break
+                        
                         # Decode message ID
                         msg_id = struct.unpack('!I', remaining_payload[:4])[0]
                         remaining_payload = remaining_payload[4:]
@@ -589,6 +595,8 @@ class ChatClient:
                         content, remaining_payload = self.protocol.decode_string(remaining_payload)
                         
                         # Decode timestamp
+                        if len(remaining_payload) < 8:
+                            break
                         timestamp = struct.unpack('!d', remaining_payload[:8])[0]
                         remaining_payload = remaining_payload[8:]
                         
@@ -626,7 +634,10 @@ class ChatClient:
                 messagebox.showerror("Error", message)
         
         except Exception as e:
-            messagebox.showerror("Error", f"Error processing message: {e}")
+            # More robust error handling
+            print(f"Error processing message: {e}")
+            # Prevent the entire error from breaking the receive loop
+            self.status_var.set(f"Error: {str(e)}")
 
     def clear_messages(self):
         for widget in self.messages_frame.winfo_children():
@@ -666,11 +677,16 @@ class ChatClient:
 
     def run(self):
         def check_users_periodically():
-            if self.username and self.running:
-                self.search_accounts()
-                self.root.after(1000, check_users_periodically)
+            try:
+                if self.username and self.running:
+                    self.search_accounts()
+            except Exception as e:
+                print(f"Error in periodic user check: {e}")
+            finally:
+                # Always schedule the next check, even if there's an error
+                self.root.after(5000, check_users_periodically)
 
-        self.root.after(1000, check_users_periodically)
+        self.root.after(5000, check_users_periodically)
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.search_accounts()
         self.root.mainloop()
