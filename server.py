@@ -39,26 +39,45 @@ class CustomWireProtocol:
     def encode_message(cmd, payload_parts):
         """
         Encode a message for transmission
-        payload_parts should be a list of bytes or strings to be encoded
+        payload_parts should be a list of various types to be encoded
         """
         # Encode each payload part
         encoded_payload = []
         for part in payload_parts:
+            if part is None:
+                continue
             if isinstance(part, str):
-                # Encode string with length prefix
+                # Encode string with length prefix (2 bytes for length)
                 encoded_str = part.encode('utf-8')
                 encoded_payload.append(struct.pack('!H', len(encoded_str)))
                 encoded_payload.append(encoded_str)
             elif isinstance(part, bytes):
+                # If it's already bytes, add directly
                 encoded_payload.append(part)
             elif isinstance(part, list):
-                # For list of message IDs
-                encoded_payload.append(struct.pack('!H', len(part)))
-                for item in part:
-                    encoded_payload.append(struct.pack('!I', item))
+                # Handle lists of IDs or other types
+                if not part:
+                    encoded_payload.append(struct.pack('!H', 0))
+                else:
+                    encoded_payload.append(struct.pack('!H', len(part)))
+                    for item in part:
+                        if isinstance(item, int):
+                            # 4 bytes for integer IDs
+                            encoded_payload.append(struct.pack('!I', item))
             elif isinstance(part, bool):
-                # For boolean values
+                # Boolean as 1 byte
                 encoded_payload.append(struct.pack('!?', part))
+            elif isinstance(part, int):
+                # Handle different integer sizes
+                if part > 65535:
+                    # 4-byte integer
+                    encoded_payload.append(struct.pack('!I', part))
+                else:
+                    # 2-byte integer for smaller numbers
+                    encoded_payload.append(struct.pack('!H', part))
+            elif isinstance(part, float):
+                # 8-byte float for timestamps
+                encoded_payload.append(struct.pack('!d', part))
         
         # Combine payload parts
         payload = b''.join(encoded_payload)
@@ -80,7 +99,11 @@ class CustomWireProtocol:
     @staticmethod
     def decode_string(data):
         """Decode a length-prefixed string"""
+        if len(data) < 2:
+            return "", data
         length = struct.unpack('!H', data[:2])[0]
+        if len(data) < 2 + length:
+            return "", data
         return data[2:2+length].decode('utf-8'), data[2+length:]
 
 class ChatServer:
@@ -167,9 +190,12 @@ class ChatServer:
 
                 # Process complete messages
                 while len(buffer) >= 6:
-                    # Peek at message length
-                    total_length = struct.unpack('!I', buffer[:4])[0]
-                    
+                    try:
+                        total_length = struct.unpack('!I', buffer[:4])[0]
+                    except struct.error:
+                        logging.error("Invalid message length")
+                        break
+
                     # Check if we have a complete message
                     if len(buffer) < total_length:
                         break
@@ -178,8 +204,12 @@ class ChatServer:
                     message_data = buffer[:total_length]
                     buffer = buffer[total_length:]
 
-                    # Decode message
-                    _, cmd, payload = self.protocol.decode_message(message_data)
+                    # Safely decode message
+                    try:
+                        _, cmd, payload = self.protocol.decode_message(message_data)
+                    except Exception as decode_error:
+                        logging.error(f"Error decoding message: {decode_error}")
+                        break
 
                     # Process different command types
                     with self.lock:
@@ -327,14 +357,25 @@ class ChatServer:
                                 "id": self.message_id_counter,
                                 "from": current_user,
                                 "content": content,
-                                "timestamp": time.time(),
+                                "timestamp": int(time.time()),  # Store as integer timestamp
                                 "read": False,
                                 "delivered_while_offline": recipient not in self.active_users
                             }
                             self.message_id_counter += 1
                             self.messages[recipient].append(message)
                             
-                            # Send success response
+                            # If recipient is active, send notification
+                            if recipient in self.active_users:
+                                try:
+                                    notification = self.protocol.encode_message(
+                                        CustomWireProtocol.CMD_SEND,
+                                        [True, "new_message", current_user, content]
+                                    )
+                                    self.active_users[recipient].send(notification)
+                                except:
+                                    pass  # Ignore notification failures
+                            
+                            # Send success response to sender
                             self.send_success_response(
                                 client_socket, 
                                 cmd, 

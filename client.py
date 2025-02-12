@@ -7,6 +7,15 @@ import argparse
 from tkinter import ttk, messagebox
 from config import Config
 
+import socket
+import struct
+import threading
+import tkinter as tk
+import time
+import argparse
+from tkinter import ttk, messagebox
+from config import Config
+
 class CustomWireProtocol:
     """
     Custom wire protocol for message encoding and decoding.
@@ -30,29 +39,45 @@ class CustomWireProtocol:
     def encode_message(cmd, payload_parts):
         """
         Encode a message for transmission
-        payload_parts should be a list of bytes or strings to be encoded
+        payload_parts should be a list of various types to be encoded
         """
         # Encode each payload part
         encoded_payload = []
         for part in payload_parts:
+            if part is None:
+                continue
             if isinstance(part, str):
-                # Encode string with length prefix
+                # Encode string with length prefix (2 bytes for length)
                 encoded_str = part.encode('utf-8')
                 encoded_payload.append(struct.pack('!H', len(encoded_str)))
                 encoded_payload.append(encoded_str)
             elif isinstance(part, bytes):
+                # If it's already bytes, add directly
                 encoded_payload.append(part)
             elif isinstance(part, list):
-                # For list of message IDs
-                encoded_payload.append(struct.pack('!H', len(part)))
-                for item in part:
-                    encoded_payload.append(struct.pack('!I', item))
+                # Handle lists of IDs or other types
+                if not part:
+                    encoded_payload.append(struct.pack('!H', 0))
+                else:
+                    encoded_payload.append(struct.pack('!H', len(part)))
+                    for item in part:
+                        if isinstance(item, int):
+                            # 4 bytes for integer IDs
+                            encoded_payload.append(struct.pack('!I', item))
             elif isinstance(part, bool):
-                # For boolean values
+                # Boolean as 1 byte
                 encoded_payload.append(struct.pack('!?', part))
             elif isinstance(part, int):
-                # For counts and IDs
-                encoded_payload.append(struct.pack('!H', part))
+                # Handle different integer sizes
+                if part > 65535:
+                    # 4-byte integer
+                    encoded_payload.append(struct.pack('!I', part))
+                else:
+                    # 2-byte integer for smaller numbers
+                    encoded_payload.append(struct.pack('!H', part))
+            elif isinstance(part, float):
+                # 8-byte float for timestamps
+                encoded_payload.append(struct.pack('!d', part))
         
         # Combine payload parts
         payload = b''.join(encoded_payload)
@@ -74,7 +99,11 @@ class CustomWireProtocol:
     @staticmethod
     def decode_string(data):
         """Decode a length-prefixed string"""
+        if len(data) < 2:
+            return "", data
         length = struct.unpack('!H', data[:2])[0]
+        if len(data) < 2 + length:
+            return "", data
         return data[2:2+length].decode('utf-8'), data[2+length:]
 
     @staticmethod
@@ -83,6 +112,9 @@ class CustomWireProtocol:
         Decode a standard success response
         Returns (success, message, remaining_payload)
         """
+        if len(payload) < 1:
+            return False, "Invalid response", b''
+        
         success = struct.unpack('!?', payload[:1])[0]
         payload = payload[1:]
         
@@ -548,10 +580,16 @@ class ChatClient:
                     self.username = message
                     # Decode unread count
                     unread_count = struct.unpack('!H', remaining_payload)[0] if remaining_payload else 0
-                    self.status_var.set(f"Logged in as: {self.username}")
-                    self.notebook.select(1)
+                    self.root.after(0, lambda: self.status_var.set(f"Logged in as: {self.username}"))
+                    self.root.after(0, lambda: self.notebook.select(1))
                     messagebox.showinfo("Login", f"Successfully logged in. {unread_count} unread messages.")
                 
+                elif message == "new_message":
+                    # Handle new message notification
+                    sender, remaining_payload = self.protocol.decode_string(remaining_payload)
+                    content, _ = self.protocol.decode_string(remaining_payload)
+                    messagebox.showinfo("New Message", f"New message from {sender}")
+
                 elif cmd == CustomWireProtocol.CMD_CREATE:
                     messagebox.showinfo("Account Created", "Account created successfully! Please log in to continue.")
                 
@@ -595,10 +633,10 @@ class ChatClient:
                         content, remaining_payload = self.protocol.decode_string(remaining_payload)
                         
                         # Decode timestamp
-                        if len(remaining_payload) < 8:
+                        if len(remaining_payload) < 4:
                             break
-                        timestamp = struct.unpack('!d', remaining_payload[:8])[0]
-                        remaining_payload = remaining_payload[8:]
+                        timestamp = struct.unpack('!d', remaining_payload[:4])[0]
+                        remaining_payload = remaining_payload[4:]
                         
                         messages.append({
                             "id": msg_id,
