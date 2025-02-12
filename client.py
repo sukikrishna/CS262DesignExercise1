@@ -154,7 +154,7 @@ class MessageFrame(ttk.Frame):
         content.pack(fill='x', pady=(5, 0))
 
 class ChatClient:
-    def __init__(self, host):
+    def __init__(self, host, port):
         self.root = tk.Tk()
         self.root.title("Chat Application (Custom Wire Protocol)")
         self.root.geometry("1000x800")
@@ -586,7 +586,7 @@ class ChatClient:
                     unread_count = struct.unpack('!H', remaining_payload)[0] if remaining_payload else 0
                     self.root.after(0, lambda: self.status_var.set(f"Logged in as: {self.username}"))
                     self.root.after(0, lambda: self.notebook.select(1))
-                    messagebox.showinfo("Login", f"Successfully logged in. {unread_count} unread messages.")
+                    messagebox.showinfo("Login", f"You have {unread_count} unread messages")
                 
                 elif message == "new_message":
                     # Handle new message notification
@@ -734,12 +734,23 @@ class ChatClient:
         self.root.mainloop()
 
 def main():
-    parser = argparse.ArgumentParser(description="Chat Client (Custom Wire Protocol)")
-    parser.add_argument("host", help="Server IP or hostname")
+    parser = argparse.ArgumentParser(description="Chat Client")
+    parser.add_argument("host", type=str, help="Server IP or hostname")
+    parser.add_argument("--port", type=int, help="Server port (optional)")
+
     args = parser.parse_args()
 
-    client = ChatClient(args.host)
+    config = Config()
+
+    # Determine host: use CLI argument
+    host = args.host
+
+    # Determine port: use CLI argument if given, otherwise use config
+    port = args.port if args.port is not None else config.get("port")
+
+    client = ChatClient(host, port)
     client.run()
+
 
 if __name__ == "__main__":
     main()
