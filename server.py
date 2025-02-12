@@ -394,22 +394,23 @@ class ChatServer:
                                 continue
 
                             # Decode desired message count
-                            count = struct.unpack('!H', payload)[0]
+                            count = struct.unpack('!H', payload[:2])[0] if payload else 50
                             
-                            # Get messages (consider implementing method like in original)
-                            messages = self.messages[current_user][-count:]
+                            # Get messages sorted by timestamp
+                            messages = sorted(
+                                self.messages[current_user],
+                                key=lambda x: x['timestamp'],
+                                reverse=True
+                            )
                             
                             # Construct response payload
                             response_parts = []
-                            for msg in messages:
-                                response_parts.extend([
-                                    msg['id'],
-                                    msg['from'],
-                                    msg['content'],
-                                    msg['timestamp']
-                                ])
                             
-                            # Send response
+                            for msg in messages:
+                                packed_id = struct.pack('!I', msg['id'])
+                                packed_timestamp = struct.pack('!I', msg['timestamp'])
+                                response_parts.extend([packed_id, msg['from'], msg['content'], packed_timestamp])
+                                                       
                             self.send_success_response(
                                 client_socket, 
                                 cmd, 
@@ -429,13 +430,14 @@ class ChatServer:
                                 continue
 
                             # Decode desired message count
-                            count = struct.unpack('!H', payload)[0]
+                            count = struct.unpack('!H', payload[:2])[0] if payload else 50
                             
                             # Get unread messages
-                            unread_messages = [
-                                msg for msg in self.messages[current_user] 
-                                if not msg["read"]
-                            ][-count:]
+                            unread_messages = sorted(
+                                [msg for msg in self.messages[current_user] if not msg["read"]],
+                                key=lambda x: x['timestamp'],
+                                reverse=True
+                            )[:count]
                             
                             # Mark messages as read
                             for msg in unread_messages:
@@ -444,12 +446,9 @@ class ChatServer:
                             # Construct response payload
                             response_parts = []
                             for msg in unread_messages:
-                                response_parts.extend([
-                                    msg['id'],
-                                    msg['from'],
-                                    msg['content'],
-                                    msg['timestamp']
-                                ])
+                                packed_id = struct.pack('!I', msg['id'])
+                                packed_timestamp = struct.pack('!I', msg['timestamp'])
+                                response_parts.extend([packed_id, msg['from'], msg['content'], packed_timestamp])
                             
                             # Send response
                             self.send_success_response(
