@@ -398,7 +398,7 @@ class ChatServer:
                             
                             # Get messages sorted by timestamp
                             messages = sorted(
-                                self.messages[current_user],
+                                [msg for msg in self.messages[current_user] if msg["read"]],
                                 key=lambda x: x['timestamp'],
                                 reverse=True
                             )
@@ -569,7 +569,7 @@ class ChatServer:
             config = Config()
             config.update("port", self.port)
         except RuntimeError as e:
-            print(f"Server error: {e}")
+            logging.info(f"Server error: {e}")
             return
 
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -592,7 +592,7 @@ class ChatServer:
                 except socket.timeout:
                     continue
                 except Exception as e:
-                    print(f"Error accepting connection: {e}")
+                    logging.info(f"Error accepting connection: {e}")
                     continue
         finally:
             self.server.close()
