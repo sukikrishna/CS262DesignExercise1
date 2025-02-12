@@ -506,6 +506,8 @@ class ChatClient:
             CustomWireProtocol.CMD_GET_MESSAGES, 
             [count]
         )
+
+        print(f"message: {message}")
         
         try:
             self.socket.send(message)
@@ -526,6 +528,8 @@ class ChatClient:
             [count]
         )
         
+        print(f"message unread: {message}")
+
         try:
             self.socket.send(message)
         except Exception as e:
@@ -635,7 +639,7 @@ class ChatClient:
                         # Decode timestamp
                         if len(remaining_payload) < 4:
                             break
-                        timestamp = struct.unpack('!d', remaining_payload[:4])[0]
+                        timestamp = struct.unpack('!I', remaining_payload[:4])[0]
                         remaining_payload = remaining_payload[4:]
                         
                         messages.append({
