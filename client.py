@@ -506,8 +506,6 @@ class ChatClient:
             CustomWireProtocol.CMD_GET_MESSAGES, 
             [count]
         )
-
-        print(f"message: {message}")
         
         try:
             self.socket.send(message)
@@ -528,8 +526,6 @@ class ChatClient:
             [count]
         )
         
-        print(f"message unread: {message}")
-
         try:
             self.socket.send(message)
         except Exception as e:
@@ -568,7 +564,6 @@ class ChatClient:
                     
             except Exception as e:
                 if self.running:
-                    print(f"Error receiving message: {e}")
                     self.root.after(0, self.on_connection_lost)
                 break
 
@@ -722,13 +717,13 @@ class ChatClient:
             try:
                 if self.username and self.running:
                     self.search_accounts()
-            except Exception as e:
-                print(f"Error in periodic user check: {e}")
+            except:
+                pass
             finally:
                 # Always schedule the next check, even if there's an error
-                self.root.after(5000, check_users_periodically)
+                self.root.after(1000, check_users_periodically)
 
-        self.root.after(5000, check_users_periodically)
+        self.root.after(1000, check_users_periodically)
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.search_accounts()
         self.root.mainloop()

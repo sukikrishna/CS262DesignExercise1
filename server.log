@@ -1,0 +1,10 @@
+2025-02-12 00:31:35,235 - INFO - New connection from ('10.250.150.216', 65088)
+2025-02-12 00:31:41,719 - INFO - New account created: M from ('10.250.150.216', 65088)
+2025-02-12 00:34:15,990 - ERROR - Error handling client: [WinError 10054] An existing connection was forcibly closed by the remote host
+2025-02-12 00:34:17,750 - INFO - New connection from ('10.250.150.216', 65133)
+2025-02-12 00:34:23,834 - INFO - New account created: N from ('10.250.150.216', 65133)
+2025-02-12 00:34:48,209 - INFO - User 'N' logged out
+2025-02-12 00:34:48,210 - ERROR - Error handling client: [WinError 10054] An existing connection was forcibly closed by the remote host
+2025-02-12 00:35:09,050 - INFO - New connection from ('10.250.150.216', 65142)
+2025-02-12 00:35:16,418 - INFO - New account created: J from ('10.250.150.216', 65142)
+2025-02-12 00:38:02,283 - ERROR - Error handling client: [WinError 10054] An existing connection was forcibly closed by the remote host
